@@ -13,6 +13,9 @@ export type RecentInboundHistoryImage = {
   contentType: string;
   sender: string;
   messageId?: string;
+  timestampMs?: number;
+  historyPosition?: number;
+  historyTotal?: number;
 };
 
 function isRemotePath(value: string): boolean {
@@ -48,6 +51,30 @@ function resolveTimestamp(value: unknown): number | undefined {
 
 function resolveHistoryEntries(ctx: MsgContext): HistoryEntry[] {
   return Array.isArray(ctx.InboundHistory) ? ctx.InboundHistory : [];
+}
+
+function formatHistoryImageTimestamp(timestampMs: number | undefined): string {
+  if (timestampMs === undefined) {
+    return "";
+  }
+  const date = new Date(timestampMs);
+  if (!Number.isFinite(date.getTime())) {
+    return "";
+  }
+  return `, sent ${date.toISOString()}`;
+}
+
+function formatHistoryImagePosition(image: RecentInboundHistoryImage): string {
+  if (
+    !Number.isSafeInteger(image.historyPosition) ||
+    !Number.isSafeInteger(image.historyTotal) ||
+    image.historyPosition <= 0 ||
+    image.historyTotal <= 0 ||
+    image.historyPosition > image.historyTotal
+  ) {
+    return "";
+  }
+  return `, message ${image.historyPosition} of ${image.historyTotal} in thread`;
 }
 
 export function resolveRecentInboundHistoryImages(params: {
@@ -100,6 +127,9 @@ export function resolveRecentInboundHistoryImages(params: {
         path: mediaPath,
         contentType,
         sender: entry.sender,
+        timestampMs: timestamp,
+        historyPosition: index + 1,
+        historyTotal: entries.length,
         ...(messageId ? { messageId } : {}),
       });
     }
@@ -116,7 +146,10 @@ export function appendRecentHistoryImageContext(params: {
   }
   const notes = params.images.map((image, index) => {
     const message = image.messageId ? `, message ${image.messageId}` : "";
-    return `[Recent image ${index + 1} from ${image.sender}${message}, attached as media.]`;
+    const context = `${message}${formatHistoryImageTimestamp(
+      image.timestampMs,
+    )}${formatHistoryImagePosition(image)}`;
+    return `[Recent image ${index + 1} from ${image.sender}${context}, attached as media.]`;
   });
   return [params.promptText, notes.join("\n")]
     .filter((part) => part.trim().length > 0)
