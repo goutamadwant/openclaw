@@ -526,6 +526,30 @@ describe("deliverReplies", () => {
     });
   });
 
+  it("strips a hook-rewritten final notify marker before native delivery and sent hooks", async () => {
+    messageHookRunner.hasHooks.mockImplementation(
+      (name: string) => name === "message_sending" || name === "message_sent",
+    );
+    messageHookRunner.runMessageSending.mockResolvedValue({ content: "hook text\nnotify=false" });
+
+    const runtime = createRuntime(false);
+    const sendMessage = vi.fn().mockResolvedValue({ message_id: 9, chat: { id: "123" } });
+    const bot = createBot({ sendMessage });
+
+    await deliverWith({
+      replies: [{ text: "hello" }],
+      runtime,
+      bot,
+    });
+
+    expect(firstMockCallArg(sendMessage, 1)).toBe("hook text");
+    expectRecordFields(mockCallArg(sendMessage, 0, 2), { disable_notification: true });
+    expectRecordFields(mockCallArg(messageHookRunner.runMessageSent, 0, 0), {
+      success: true,
+      content: "hook text",
+    });
+  });
+
   it("passes accountId into message hooks", async () => {
     messageHookRunner.hasHooks.mockImplementation(
       (name: string) => name === "message_sending" || name === "message_sent",
@@ -576,6 +600,43 @@ describe("deliverReplies", () => {
     expect(firstMockCallArg(sendMessage, 0)).toBe("123");
     firstSendText(sendMessage);
     expectRecordFields(mockCallArg(sendMessage, 0, 2), { disable_notification: true });
+  });
+
+  it("strips a final standalone notify marker from native text replies and sends silently", async () => {
+    const runtime = createRuntime();
+    const sendMessage = vi.fn().mockResolvedValue({
+      message_id: 5,
+      chat: { id: "123" },
+    });
+    const bot = createBot({ sendMessage });
+
+    await deliverWith({
+      replies: [{ text: "hello\nnotify=false" }],
+      runtime,
+      bot,
+    });
+
+    expect(firstMockCallArg(sendMessage, 0)).toBe("123");
+    expect(firstMockCallArg(sendMessage, 1)).toBe("hello");
+    expectRecordFields(mockCallArg(sendMessage, 0, 2), { disable_notification: true });
+  });
+
+  it("preserves inline notify markers in native text replies", async () => {
+    const runtime = createRuntime();
+    const sendMessage = vi.fn().mockResolvedValue({
+      message_id: 5,
+      chat: { id: "123" },
+    });
+    const bot = createBot({ sendMessage });
+
+    await deliverWith({
+      replies: [{ text: "keep notify=false inline" }],
+      runtime,
+      bot,
+    });
+
+    expect(firstMockCallArg(sendMessage, 1)).toBe("keep notify=false inline");
+    expect(mockCallArg(sendMessage, 0, 2)).not.toHaveProperty("disable_notification");
   });
 
   it("emits internal message:sent when session hook context is available", async () => {
@@ -813,6 +874,33 @@ describe("deliverReplies", () => {
     expectRecordFields(mockCallArg(sendPhoto, 0, 2), {
       caption: "hi <b>boss</b>",
       parse_mode: "HTML",
+    });
+  });
+
+  it("strips a final standalone notify marker from native media captions and sends silently", async () => {
+    const runtime = createRuntime();
+    const sendPhoto = vi.fn().mockResolvedValue({
+      message_id: 2,
+      chat: { id: "123" },
+    });
+    const bot = createBot({ sendPhoto });
+
+    mockMediaLoad("photo.jpg", "image/jpeg", "image");
+
+    await deliverWith({
+      replies: [{ mediaUrl: "https://example.com/photo.jpg", text: "hi\nnotify=false" }],
+      runtime,
+      bot,
+    });
+
+    expect(firstMockCallArg(sendPhoto, 0)).toBe("123");
+    if (firstMockCallArg(sendPhoto, 1) === undefined) {
+      throw new Error("Expected Telegram photo media");
+    }
+    expectRecordFields(mockCallArg(sendPhoto, 0, 2), {
+      caption: "hi",
+      parse_mode: "HTML",
+      disable_notification: true,
     });
   });
 

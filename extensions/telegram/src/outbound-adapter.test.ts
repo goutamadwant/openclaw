@@ -138,6 +138,32 @@ describe("telegramOutbound", () => {
     expect(result).toEqual({ channel: "telegram", messageId: "tg-2", chatId: "12345" });
   });
 
+  it("strips a final standalone notify marker before durable payload media fan-out", async () => {
+    sendMessageTelegramMock
+      .mockResolvedValueOnce({ messageId: "tg-1", chatId: "12345" })
+      .mockResolvedValueOnce({ messageId: "tg-2", chatId: "12345" });
+
+    const result = await telegramOutbound.sendPayload!({
+      cfg: {} as never,
+      to: "12345",
+      text: "",
+      payload: {
+        text: "Approval required\nnotify=false",
+        mediaUrls: ["https://example.com/1.jpg", "https://example.com/2.jpg"],
+      },
+      deps: { sendTelegram: sendMessageTelegramMock },
+    });
+
+    expect(sendMessageTelegramMock).toHaveBeenCalledTimes(2);
+    const firstOptions = callOptionsAt(sendMessageTelegramMock, 0, "12345", "Approval required");
+    expect(firstOptions.mediaUrl).toBe("https://example.com/1.jpg");
+    expect(firstOptions.silent).toBe(true);
+    const secondOptions = callOptionsAt(sendMessageTelegramMock, 1, "12345", "");
+    expect(secondOptions.mediaUrl).toBe("https://example.com/2.jpg");
+    expect(secondOptions.silent).toBe(true);
+    expect(result).toEqual({ channel: "telegram", messageId: "tg-2", chatId: "12345" });
+  });
+
   it("uses interactive button labels as fallback text for button-only payloads", async () => {
     sendMessageTelegramMock.mockResolvedValueOnce({ messageId: "tg-buttons", chatId: "12345" });
 

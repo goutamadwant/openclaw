@@ -1826,6 +1826,36 @@ describe("sendMessageTelegram", () => {
     });
   });
 
+  it("strips a final standalone notify marker from media captions and sends silently", async () => {
+    const chatId = "123";
+    const sendPhoto = vi.fn().mockResolvedValue({
+      message_id: 59,
+      chat: { id: chatId },
+    });
+    const api = { sendPhoto } as unknown as {
+      sendPhoto: typeof sendPhoto;
+    };
+
+    mockLoadedMedia({
+      buffer: Buffer.from("fake-image"),
+      contentType: "image/jpeg",
+      fileName: "photo.jpg",
+    });
+
+    await sendMessageTelegram(chatId, "photo caption\nnotify=false", {
+      cfg: TELEGRAM_TEST_CFG,
+      token: "tok",
+      api,
+      mediaUrl: "https://example.com/photo.jpg",
+    });
+
+    expectMediaSendCall(firstMockCall(sendPhoto, "send photo call"), "send photo call", chatId, {
+      caption: "photo caption",
+      parse_mode: "HTML",
+      disable_notification: true,
+    });
+  });
+
   it("splits long captions into media + text messages when text exceeds 1024 chars", async () => {
     const chatId = "123";
     const longText = "A".repeat(1100);
@@ -3053,6 +3083,49 @@ describe("sendMessageTelegram", () => {
     expect(sendMessage).toHaveBeenCalledWith(chatId, "hi", {
       parse_mode: "HTML",
       disable_notification: true,
+    });
+  });
+
+  it("strips a final standalone notify marker and sends text silently", async () => {
+    const chatId = "123";
+    const sendMessage = vi.fn().mockResolvedValue({
+      message_id: 1,
+      chat: { id: chatId },
+    });
+    const api = { sendMessage } as unknown as {
+      sendMessage: typeof sendMessage;
+    };
+
+    await sendMessageTelegram(chatId, "heartbeat summary\nnotify=false", {
+      cfg: TELEGRAM_TEST_CFG,
+      token: "tok",
+      api,
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(chatId, "heartbeat summary", {
+      parse_mode: "HTML",
+      disable_notification: true,
+    });
+  });
+
+  it("preserves inline notify markers as visible Telegram text", async () => {
+    const chatId = "123";
+    const sendMessage = vi.fn().mockResolvedValue({
+      message_id: 1,
+      chat: { id: chatId },
+    });
+    const api = { sendMessage } as unknown as {
+      sendMessage: typeof sendMessage;
+    };
+
+    await sendMessageTelegram(chatId, "keep notify=false inline", {
+      cfg: TELEGRAM_TEST_CFG,
+      token: "tok",
+      api,
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(chatId, "keep notify=false inline", {
+      parse_mode: "HTML",
     });
   });
 

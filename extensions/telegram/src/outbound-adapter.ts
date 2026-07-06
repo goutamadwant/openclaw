@@ -26,6 +26,7 @@ import type { TelegramInlineButtons } from "./button-types.js";
 import { resolveTelegramInlineButtons } from "./button-types.js";
 import { splitTelegramHtmlChunks } from "./format.js";
 import { resolveTelegramInteractiveTextFallback } from "./interactive-fallback.js";
+import { consumeTrailingNotifyFalseMarker } from "./notify-marker.js";
 import { resolveTelegramPromptContextTimestampMs } from "./outbound-message-context.js";
 import { parseTelegramReplyToMessageId, parseTelegramThreadId } from "./outbound-params.js";
 import { loadTelegramSendModule, type TelegramSendModule } from "./send-runtime.js";
@@ -150,12 +151,17 @@ export async function sendTelegramPayloadMessages(params: {
   const reactionEmoji =
     typeof telegramData?.reaction?.emoji === "string" ? telegramData.reaction.emoji : undefined;
   const presentation = normalizeMessagePresentation(params.payload.presentation);
-  const text =
+  const resolvedText =
     resolveTelegramInteractiveTextFallback({
       text: params.payload.text,
       interactive: params.payload.interactive,
       presentation,
     }) ?? "";
+  const normalizedDelivery = consumeTrailingNotifyFalseMarker({
+    text: resolvedText,
+    silent: params.baseOpts.silent,
+  });
+  const text = normalizedDelivery.text;
   const mediaUrls = resolvePayloadMediaUrls(params.payload);
   const buttons = resolveTelegramInlineButtons({
     buttons: telegramData?.buttons,
@@ -165,6 +171,7 @@ export async function sendTelegramPayloadMessages(params: {
   const replyToMessageId = params.baseOpts.replyToMessageId;
   const payloadOpts = {
     ...params.baseOpts,
+    silent: normalizedDelivery.silent,
     quoteText,
     promptContextTimestampMs: resolveTelegramPromptContextTimestampMs(params.payload),
     ...(params.payload.audioAsVoice === true ? { asVoice: true } : {}),
@@ -321,8 +328,13 @@ export function createTelegramOutboundAdapter(
           ...params,
           resolveSend,
         });
-        return await send(outboundTo, params.text, {
+        const normalizedDelivery = consumeTrailingNotifyFalseMarker({
+          text: params.text,
+          silent: baseOpts.silent,
+        });
+        return await send(outboundTo, normalizedDelivery.text, {
           ...baseOpts,
+          silent: normalizedDelivery.silent,
         });
       },
       sendMedia: async (params) => {
@@ -330,8 +342,13 @@ export function createTelegramOutboundAdapter(
           ...params,
           resolveSend,
         });
-        return await send(outboundTo, params.text, {
+        const normalizedDelivery = consumeTrailingNotifyFalseMarker({
+          text: params.text,
+          silent: baseOpts.silent,
+        });
+        return await send(outboundTo, normalizedDelivery.text, {
           ...baseOpts,
+          silent: normalizedDelivery.silent,
           mediaUrl: params.mediaUrl,
           mediaLocalRoots: params.mediaLocalRoots,
           mediaReadFile: params.mediaReadFile,

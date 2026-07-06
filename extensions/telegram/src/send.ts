@@ -39,6 +39,7 @@ import {
   isTelegramRateLimitError,
   isTelegramServerError,
 } from "./network-errors.js";
+import { consumeTrailingNotifyFalseMarker } from "./notify-marker.js";
 import { recordOutboundMessageForPromptContext } from "./outbound-message-context.js";
 import { makeProxyFetch } from "./proxy.js";
 import {
@@ -707,6 +708,12 @@ export async function sendMessageTelegram(
   text: string,
   opts: TelegramSendOpts,
 ): Promise<TelegramSendResult> {
+  const normalizedDelivery = consumeTrailingNotifyFalseMarker({
+    text,
+    silent: opts.silent,
+  });
+  const effectiveText = normalizedDelivery.text;
+  const effectiveSilent = normalizedDelivery.silent;
   const { cfg, account, api } = resolveTelegramApiContext(opts);
   const target = parseTelegramTarget(to);
   const chatId = await resolveAndPersistChatId({
@@ -791,7 +798,7 @@ export async function sendMessageTelegram(
     }
     const plainParams: TelegramSendMessageParams = {
       ...baseParams,
-      ...(opts.silent === true ? { disable_notification: true } : {}),
+      ...(effectiveSilent === true ? { disable_notification: true } : {}),
     };
     const requestSendMessage = (
       label: string,
@@ -929,7 +936,7 @@ export async function sendMessageTelegram(
         deliveryKind: "text",
         messageThreadId: lastAcceptedParams?.message_thread_id,
         replyToMessageId: opts.replyToMessageId,
-        silent: opts.silent,
+        silent: effectiveSilent,
         chunkCount: sentChunkCount,
       });
     }
@@ -1047,7 +1054,7 @@ export async function sendMessageTelegram(
                     ? { html: chunk.text, skip_entity_detection: true }
                     : { html: chunk.text },
                   ...effectiveParams,
-                  ...(opts.silent === true ? { disable_notification: true } : {}),
+                  ...(effectiveSilent === true ? { disable_notification: true } : {}),
                 }),
               retryLabel,
             ),
@@ -1134,7 +1141,7 @@ export async function sendMessageTelegram(
         deliveryKind: "text",
         messageThreadId: lastAcceptedParams?.message_thread_id,
         replyToMessageId: opts.replyToMessageId,
-        silent: opts.silent,
+        silent: effectiveSilent,
         chunkCount: sentChunkCount,
       });
     }
@@ -1215,9 +1222,9 @@ export async function sendMessageTelegram(
 
     if (isVideoNote) {
       caption = undefined;
-      followUpText = text.trim() ? text : undefined;
+      followUpText = effectiveText.trim() ? effectiveText : undefined;
     } else {
-      const split = splitTelegramCaption(text);
+      const split = splitTelegramCaption(effectiveText);
       caption = split.caption;
       followUpText = split.followUpText;
     }
@@ -1242,13 +1249,13 @@ export async function sendMessageTelegram(
     const mediaParams = {
       ...(htmlCaption ? { caption: htmlCaption, parse_mode: "HTML" as const } : {}),
       ...baseMediaParams,
-      ...(opts.silent === true ? { disable_notification: true } : {}),
+      ...(effectiveSilent === true ? { disable_notification: true } : {}),
       ...(videoDimensions ? { width: videoDimensions.width, height: videoDimensions.height } : {}),
     };
     const plainMediaParams = {
       ...(plainCaption ? { caption: plainCaption } : {}),
       ...baseMediaParams,
-      ...(opts.silent === true ? { disable_notification: true } : {}),
+      ...(effectiveSilent === true ? { disable_notification: true } : {}),
       ...(videoDimensions ? { width: videoDimensions.width, height: videoDimensions.height } : {}),
     };
     const sendMedia = async (
@@ -1385,7 +1392,7 @@ export async function sendMessageTelegram(
       deliveryKind: mediaSender.label,
       messageThreadId: mediaParams.message_thread_id,
       replyToMessageId: opts.replyToMessageId,
-      silent: opts.silent,
+      silent: effectiveSilent,
     });
     recordChannelActivity({
       channel: "telegram",
@@ -1408,10 +1415,10 @@ export async function sendMessageTelegram(
     return { messageId: String(mediaMessageId), chatId: resolvedChatId };
   }
 
-  if (!text || !text.trim()) {
+  if (!effectiveText || !effectiveText.trim()) {
     throw new Error("Message must be non-empty for Telegram sends");
   }
-  const textResult = await sendChunkedText(text, "text send");
+  const textResult = await sendChunkedText(effectiveText, "text send");
   recordChannelActivity({
     channel: "telegram",
     accountId: account.accountId,

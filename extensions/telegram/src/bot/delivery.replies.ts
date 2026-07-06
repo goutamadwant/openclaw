@@ -38,6 +38,7 @@ import {
   wrapFileReferencesInHtml,
 } from "../format.js";
 import { resolveTelegramInteractiveTextFallback } from "../interactive-fallback.js";
+import { consumeTrailingNotifyFalseMarker } from "../notify-marker.js";
 import { splitTelegramRichMessageTextChunks, TELEGRAM_RICH_TEXT_LIMIT } from "../rich-message.js";
 import { isTelegramHtmlParseError } from "../rich-plain-fallback.js";
 import { buildInlineKeyboard, reactMessageTelegram } from "../send.js";
@@ -951,6 +952,15 @@ export async function deliverReplies(params: {
           : { ...reply, text: hookResult.content };
       }
     }
+    const normalizedDelivery = consumeTrailingNotifyFalseMarker({
+      text: reply.text ?? "",
+      silent: params.silent,
+    });
+    const effectiveSilent = normalizedDelivery.silent;
+    const effectiveReplyText = normalizedDelivery.text;
+    if (effectiveReplyText !== (reply.text ?? "")) {
+      reply = { ...reply, text: effectiveReplyText };
+    }
 
     let contentForSentHook =
       reply.text || (reply.audioAsVoice === true ? resolveVoiceFallbackText(reply) : "") || "";
@@ -981,7 +991,7 @@ export async function deliverReplies(params: {
           continue;
         }
       }
-      if (mediaList.length === 0 && resolvedReplyText) {
+      if (mediaList.length === 0 && effectiveReplyText) {
         firstDeliveredMessageId = await deliverTextReply({
           bot: params.bot,
           chatId: params.chatId,
@@ -997,7 +1007,7 @@ export async function deliverReplies(params: {
           richMessages: params.richMessages,
           tableMode: params.tableMode,
           linkPreview: params.linkPreview,
-          silent: params.silent,
+          silent: effectiveSilent,
           replyToId,
           replyToMode: params.replyToMode,
           progress,
@@ -1018,7 +1028,7 @@ export async function deliverReplies(params: {
           mediaLoader,
           onVoiceRecording: params.onVoiceRecording,
           linkPreview: params.linkPreview,
-          silent: params.silent,
+          silent: effectiveSilent,
           replyQuoteMessageId: replyQuote.messageId,
           replyQuoteText: replyQuote.text,
           replyQuotePosition: replyQuote.position,
