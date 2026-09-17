@@ -22,5 +22,5 @@ export async function readPreflightTranscriptContextMessages(
   return (await readSessionMessagesAsync(scope, {
     mode: "full",
     reason: "preflight-compaction-estimate-legacy",
-  })) as AgentMessage[];
+  })) as AgentMessage[]; // SAFETY: Gateway readers project stored rows as AgentMessage values.
 }
