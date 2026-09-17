@@ -47,7 +47,6 @@ import {
 } from "../../config/sessions.js";
 import {
   persistCompactionBoundaryWithSessionEntrySync,
-  readSessionTranscriptContextMessages,
   readSessionTranscriptActiveStats,
   updateSessionEntry,
   withRecentSessionTranscriptActiveEvents,
@@ -58,7 +57,6 @@ import {
   selectSessionTranscriptLeafControlledPath,
 } from "../../config/sessions/transcript-tree.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import { readSessionMessagesAsync } from "../../gateway/session-transcript-readers.js";
 import { logVerbose } from "../../globals.js";
 import { isAbortError } from "../../infra/abort-signal.js";
 import { clearAgentRunContext, registerAgentRunContext } from "../../infra/agent-run-registry.js";
@@ -74,6 +72,7 @@ import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import { formatTokenCount } from "../../utils/token-format.js";
 import type { VerboseLevel } from "../thinking.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
+import { readPreflightTranscriptContextMessages } from "./agent-runner-memory-transcript-context.js";
 import {
   buildEmbeddedRunExecutionParams,
   resolveModelFallbackOptions,
@@ -669,33 +668,12 @@ async function estimatePromptTokensFromSessionTranscript(params: {
         transcriptByteSize: snapshot.byteSize,
       };
     }
-    const context = readSessionTranscriptContextMessages(
-      {
-        agentId: params.agentId ?? resolveAgentIdFromSessionKey(params.sessionKey),
-        sessionId,
-        sessionKey: params.sessionKey,
-        storePath: params.storePath,
-      },
-      (contextMessages, header) => ({
-        available: header !== undefined,
-        messages: Array.from(contextMessages),
-      }),
-    );
-    // Headerless legacy projections have no canonical context snapshot.
-    const messages = context.available
-      ? context.messages
-      : ((await readSessionMessagesAsync(
-          {
-            agentId: params.agentId ?? resolveAgentIdFromSessionKey(params.sessionKey),
-            sessionId,
-            sessionKey: params.sessionKey,
-            storePath: params.storePath,
-          },
-          {
-            mode: "full",
-            reason: "preflight-compaction-estimate-legacy",
-          },
-        )) as AgentMessage[]);
+    const messages = await readPreflightTranscriptContextMessages({
+      agentId: params.agentId ?? resolveAgentIdFromSessionKey(params.sessionKey),
+      sessionId,
+      sessionKey: params.sessionKey,
+      storePath: params.storePath,
+    });
     const estimatedTokens = await estimateProviderPromptTokens(
       messages,
       params.contextWindowTokens,
