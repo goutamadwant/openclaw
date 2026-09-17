@@ -47,6 +47,7 @@ import {
 } from "../../config/sessions.js";
 import {
   persistCompactionBoundaryWithSessionEntrySync,
+  readSessionTranscriptContextMessages,
   readSessionTranscriptActiveStats,
   updateSessionEntry,
   withRecentSessionTranscriptActiveEvents,
@@ -668,18 +669,33 @@ async function estimatePromptTokensFromSessionTranscript(params: {
         transcriptByteSize: snapshot.byteSize,
       };
     }
-    const messages = (await readSessionMessagesAsync(
+    const context = readSessionTranscriptContextMessages(
       {
         agentId: params.agentId ?? resolveAgentIdFromSessionKey(params.sessionKey),
         sessionId,
         sessionKey: params.sessionKey,
         storePath: params.storePath,
       },
-      {
-        mode: "full",
-        reason: "preflight-compaction-estimate",
-      },
-    )) as AgentMessage[];
+      (contextMessages, header) => ({
+        available: header !== undefined,
+        messages: Array.from(contextMessages),
+      }),
+    );
+    // Headerless legacy projections have no canonical context snapshot.
+    const messages = context.available
+      ? context.messages
+      : ((await readSessionMessagesAsync(
+          {
+            agentId: params.agentId ?? resolveAgentIdFromSessionKey(params.sessionKey),
+            sessionId,
+            sessionKey: params.sessionKey,
+            storePath: params.storePath,
+          },
+          {
+            mode: "full",
+            reason: "preflight-compaction-estimate-legacy",
+          },
+        )) as AgentMessage[]);
     const estimatedTokens = await estimateProviderPromptTokens(
       messages,
       params.contextWindowTokens,
