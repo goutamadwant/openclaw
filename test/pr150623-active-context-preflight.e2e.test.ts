@@ -54,7 +54,7 @@ describe("active-context preflight compaction", () => {
         updatedAt: Date.now(),
         totalTokensFresh: false,
       });
-      const transcript = SessionManager.open(scope, instance.workspaceDir);
+      const transcript = SessionManager.open(scope, instance.state.workspaceDir);
       transcript.appendMessage({
         role: "user",
         content: `${SUPERSEDED_MARKER} `.repeat(25_000),
