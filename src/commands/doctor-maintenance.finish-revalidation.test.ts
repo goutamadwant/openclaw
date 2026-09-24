@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { hostname } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import * as restartHealthProbe from "../cli/daemon-cli/restart-health-probe.js";
 import { waitForGatewayHealthyRestart } from "../cli/daemon-cli/restart-health.js";
 import {
   ServiceInspectionError,
@@ -15,9 +16,12 @@ import { createSystemdCommandQuery } from "../daemon/systemd-command-query.js";
 import { readLoadedSystemdServiceRuntime } from "../daemon/systemd-loaded-runtime.js";
 import * as gatewayLock from "../infra/gateway-lock.js";
 import { openNodeSqliteDatabase } from "../infra/node-sqlite.js";
+import * as packageJson from "../infra/package-json.js";
+import * as portsInspect from "../infra/ports-inspect.js";
 import { tryAcquireExclusiveSqliteCoordinator } from "../infra/sqlite-coordinator.js";
 import * as sqliteSnapshotSource from "../infra/sqlite-snapshot-source.js";
 import { acquireGatewayLifecycleCoordinator } from "../infra/state-database-coordinator.js";
+import * as updateGitRuntime from "../infra/update-git-runtime.js";
 import * as updateRunDriver from "../infra/update-run-driver.js";
 import { readUpdateRunDriver } from "../infra/update-run-driver.js";
 import {
@@ -35,6 +39,7 @@ import {
   openOpenClawStateDatabase,
 } from "../state/openclaw-state-db.js";
 import { withEnvAsync } from "../test-utils/env.js";
+import { acquireTestPortBlock, type TestPortClaim } from "../test-utils/port-claims.js";
 import { mockProcessPlatform } from "../test-utils/vitest-spies.js";
 import { beginDoctorMaintenance } from "./doctor-maintenance.js";
 import { stoppedSystemdBinding } from "./doctor-maintenance.test-support.js";
@@ -48,6 +53,14 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../daemon/service.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../daemon/service.js")>()),
   resolveGatewayService: (...args: []) => mocks.resolveService(...args),
+}));
+
+vi.mock("../cli/update-cli/update-command-service-drain.js", () => ({
+  withGatewayMaintenanceDrain: async (_params: unknown, stop: () => Promise<unknown>) =>
+    await stop(),
+}));
+vi.mock("../daemon/systemd-maintenance.js", () => ({
+  prepareSystemdGatewayMaintenance: async () => false,
 }));
 
 vi.mock("./doctor-service-repair-policy.js", async (importOriginal) => ({
@@ -94,10 +107,34 @@ vi.mock("../infra/sqlite-coordinator.js", async (importOriginal) => {
 });
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+let gatewayPort: TestPortClaim;
+beforeAll(async () => {
+  gatewayPort = await acquireTestPortBlock({ offsets: [0] });
+});
+afterAll(async () => {
+  await gatewayPort?.release();
+});
 beforeEach(() => {
   mockSystemAccountHome();
   mocks.stops = 0;
   vi.mocked(waitForGatewayHealthyRestart).mockClear();
+  // Exercise the real owner-lease reader without depending on a host listener or dist build.
+  vi.spyOn(packageJson, "readPackageVersion").mockResolvedValue("2026.9.5");
+  vi.spyOn(updateGitRuntime, "readBuiltGatewayBuildId").mockResolvedValue("doctor-fixture-build");
+  vi.spyOn(portsInspect, "inspectPortUsage").mockImplementation(async (port) => ({
+    port,
+    status: "busy",
+    listeners: [],
+    hints: ["process details are unavailable"],
+  }));
+  vi.spyOn(restartHealthProbe, "confirmGatewayReachable").mockResolvedValue({
+    reachable: true,
+    gatewayVersion: "2026.9.5",
+    gatewayBuildId: "doctor-fixture-build",
+    activatedPluginErrors: [],
+    unavailablePlugins: [],
+    channelProbeErrors: [],
+  });
 });
 afterEach(() => {
   closeOpenClawStateDatabaseForTest();
@@ -290,7 +327,7 @@ async function runDoctorFinishForStoppedUnit(
               now,
               JSON.stringify({
                 owner: { pid: process.pid, host: hostname(), startedAt },
-                port: 18789,
+                port: gatewayPort.port,
                 mode: "supervised",
                 supervisor: { kind: "systemd", name: "openclaw-gateway.service" },
               }),
@@ -358,7 +395,7 @@ async function runDoctorFinishForStoppedUnit(
         vi.spyOn(gatewayLock, "readActiveGatewayLockIdentity").mockResolvedValue({
           pid: legacyGatewayPid,
           createdAt: new Date().toISOString(),
-          port: 18789,
+          port: gatewayPort.port,
         });
       }
       const command = {
@@ -367,7 +404,7 @@ async function runDoctorFinishForStoppedUnit(
           path.join(process.cwd(), "openclaw.mjs"),
           "gateway",
           "--port",
-          "18789",
+          String(gatewayPort.port),
         ],
         environment: {
           HOME: legacyCatalog === "different-state" ? path.join(home, "other") : home,
@@ -730,8 +767,12 @@ it("refuses a foreign lifecycle holder before stopping the service", async () =>
 });
 
 it.each([
-  { catalog: "exact", continuation: "manual", message: "is still in progress" },
-  { catalog: "conflict-on-recheck", continuation: undefined, message: "is still in progress" },
+  { catalog: "exact", continuation: "manual", message: "remains recorded as running" },
+  {
+    catalog: "conflict-on-recheck",
+    continuation: undefined,
+    message: "remains recorded as running",
+  },
   {
     catalog: "future-version",
     continuation: undefined,
@@ -780,7 +821,7 @@ it.each([
   { continuation: "competing", name: "an owning continuation alongside a different live driver" },
 ] as const)("refuses $name while another update owns the service", async ({ continuation }) => {
   await expect(runDoctorFinishForStoppedUnit("retained", continuation)).rejects.toThrow(
-    /is still in progress.*liveness: alive/,
+    /remains recorded as running.*liveness: alive/,
   );
   expect(mocks.stops).toBe(0);
 });
@@ -807,7 +848,7 @@ it("never lets the Doctor child stop or restart its parent's running service", a
 
 it("rechecks continuation before stopping the service", async () => {
   await expect(runDoctorFinishForStoppedUnit("retained", "lost-before-stop")).rejects.toThrow(
-    "is still in progress",
+    "remains recorded as running",
   );
 });
 
@@ -817,7 +858,7 @@ it("rechecks continuation before restoring the service", async () => {
     "lost-before-restart",
   );
   expect(finishError).toMatchObject({
-    message: expect.stringContaining("is still in progress"),
+    message: expect.stringContaining("remains recorded as running"),
   });
   expect(restartCalls).toBe(0);
 });
@@ -860,7 +901,7 @@ it.each([
 it("does not treat an inconclusive inspection as admission to a competing update", async () => {
   const result = await runDoctorFinishForStoppedUnit("inspection-competing");
   expect(result.finishError).toMatchObject({
-    message: expect.stringContaining("is still in progress"),
+    message: expect.stringContaining("remains recorded as running"),
   });
   expect(result.startCalls).toBe(0);
   expect(result.restartCalls).toBe(0);
@@ -905,7 +946,9 @@ it("rechecks update admission after passive native inspection before restoring t
   const { finishError, restartCalls } = await runDoctorFinishForStoppedUnit(
     "competing-during-inspection",
   );
-  expect(finishError).toMatchObject({ message: expect.stringContaining("is still in progress") });
+  expect(finishError).toMatchObject({
+    message: expect.stringContaining("remains recorded as running"),
+  });
   expect(restartCalls).toBe(0);
 });
 

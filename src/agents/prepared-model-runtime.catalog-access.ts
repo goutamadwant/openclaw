@@ -79,13 +79,13 @@ export function createFullModelCatalogAccess(
   const projectInventory = createPreparedModelCatalogProjection({ ...params, normalizeProvider });
   const project = (
     catalog: ModelCatalogSnapshot,
-    source:
-      | Pick<PreparedModelCatalogInventory, "runtimeModels" | "configuredProviderModelIds">
-      | undefined = inventory,
+    runtimeModels:
+      | PreparedModelCatalogInventory["runtimeModels"]
+      | undefined = inventory?.runtimeModels,
   ) => {
-    const projected = projectInventory(catalog, currentConfiguredRuntimeModels, source);
-    publishedRuntimeModels = projected.runtimeModels;
-    return attempt.withRefreshStatus(projected.catalog);
+    const projected = projectInventory(catalog, currentConfiguredRuntimeModels);
+    publishedRuntimeModels = runtimeModels;
+    return attempt.withRefreshStatus(projected);
   };
   const inventoryKey = preparedModelInventoryKey(params.agentFacts.input);
   const nativeSource = fingerprintPreparedRuntimeFacts({
@@ -147,11 +147,6 @@ export function createFullModelCatalogAccess(
               retainedProviders.has(normalizeProvider(provider)),
             ),
           ),
-          configuredProviderModelIds: new Map(
-            [...previousInventory.configuredProviderModelIds].filter(([provider]) =>
-              retainedProviders.has(normalizeProvider(provider)),
-            ),
-          ),
           nativeSource,
           providers: new Map(
             [...previousInventory.providers].filter(([provider]) =>
@@ -178,6 +173,16 @@ export function createFullModelCatalogAccess(
       !entry.nativeRuntime || identifiedNativeProviders.has(normalizeProvider(entry.provider));
     inventory.catalog.entries = inventory.catalog.entries.filter(retain);
     inventory.catalog.routeVariants = inventory.catalog.routeVariants.filter(retain);
+    if (inventory.catalog.nativeProviderOutcomes) {
+      inventory.catalog.nativeProviderOutcomes = Object.fromEntries(
+        Object.entries(inventory.catalog.nativeProviderOutcomes).map(([runtime, outcomes]) => [
+          runtime,
+          outcomes.filter(({ provider }) =>
+            identifiedNativeProviders.has(normalizeProvider(provider)),
+          ),
+        ]),
+      );
+    }
   }
   const currentAuth = {
     authStore: params.agentFacts.authStore,
@@ -360,7 +365,6 @@ export function createFullModelCatalogAccess(
             configuredRuntimeModels,
             runtimeModels,
             providerExpiries,
-            configuredProviderModelIds,
           } = await worker.loadCatalog(providerIds, (error) => {
             if (
               (providerIds ?? providers).some((provider) =>
@@ -450,14 +454,7 @@ export function createFullModelCatalogAccess(
           }
           setCatalogAuth(publication.catalog, auth);
           currentConfiguredRuntimeModels = configuredRuntimeModels;
-          const membershipSource = new Map([
-            ...(inventory?.configuredProviderModelIds ?? []),
-            ...configuredProviderModelIds,
-          ]);
-          const catalog = project(publication.catalog, {
-            runtimeModels: publication.runtimeModels,
-            configuredProviderModelIds: membershipSource,
-          });
+          const catalog = project(publication.catalog, publication.runtimeModels);
           setCatalogAuth(catalog, auth);
           assertCurrent();
           const completedProviders = new Map(providerIds ? inventory?.providers : undefined);
@@ -480,7 +477,6 @@ export function createFullModelCatalogAccess(
           }
           inventory = {
             ...publication,
-            configuredProviderModelIds: membershipSource,
             key: inventoryKey,
             pluginFingerprint,
             nativeSource,
@@ -515,6 +511,7 @@ export function createFullModelCatalogAccess(
           input: params.agentFacts.input,
           nativeSelection,
           snapshot: rawInventory,
+          normalizeProvider,
           preparedSnapshot: current,
           pluginRegistry: params.pluginGeneration.pluginRegistry,
           isCurrent: params.isCurrent,
@@ -585,7 +582,6 @@ export function createFullModelCatalogAccess(
           inventory = {
             catalog: mergePreparedNativeCatalog(rawCatalog, rawInventory),
             runtimeModels: inventory?.runtimeModels ?? new Map(),
-            configuredProviderModelIds: inventory?.configuredProviderModelIds ?? new Map(),
             key: inventoryKey,
             pluginFingerprint,
             nativeSource,

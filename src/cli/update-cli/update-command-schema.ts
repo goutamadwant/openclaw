@@ -73,6 +73,9 @@ export async function previewUpdateCommand(params: {
         prepared.controlPlaneUpdateSentinelMeta?.completionOwner === "gateway-restart" || undefined,
     }));
   if (preflight) {
+    if (target.inspectionWarning) {
+      preflight.preflightNotes.push(target.inspectionWarning);
+    }
     if (
       target.packageInstallTarget &&
       !target.packageAlreadyCurrent &&
@@ -205,7 +208,9 @@ export async function preflightUpdateCommandSchemas(params: {
           : { schemaVersions: packageTargetSchemaVersions };
       if ("metadataUnreadable" in target && target.metadataUnreadable) {
         const failure = createUpdatePreflightFailure(
-          "target-git-metadata",
+          "failureCode" in target && target.failureCode
+            ? target.failureCode
+            : "target-git-metadata",
           target.metadataUnreadable,
         );
         throw new UpdatePreMutationError("target-metadata-preflight", failure.message, {

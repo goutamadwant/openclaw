@@ -1,6 +1,7 @@
 // Preserve module setup before modules that consume it.
 // oxfmt-ignore
 import {
+  getPreparedModelRuntimeTestApi,
   getPreparedModelRuntimeMocks,
   resetPreparedModelRuntimeHarness,
 } from "./prepared-model-runtime.test-harness.js";
@@ -598,5 +599,59 @@ describe("prepared model runtime catalog recovery", () => {
       loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" }),
     ).resolves.toMatchObject({ config: replacementConfig });
     expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not report recovery through an unrelated degraded replacement", async () => {
+    mocks.configuredAgentIds = ["default"];
+    const config = {};
+    await refreshPreparedModelRuntimeSnapshots(config, { gatewayLifecycle: true });
+    const defaultInput = {
+      agentId: "default",
+      config,
+      agentDir: "/tmp/unused-agent",
+      inheritedAuthDir: "/tmp/unused-agent",
+      workspaceDir: "/tmp/unused-workspace",
+    };
+    const initialDefault = getPreparedModelRuntimeSnapshot(defaultInput);
+    expect(initialDefault).toBeDefined();
+    if (!initialDefault) {
+      throw new Error("default prepared model runtime owner was not published");
+    }
+
+    getPreparedModelRuntimeTestApi().setModelRuntimeBuildTimeoutMsForTest(1);
+    mocks.configuredAgentIds = ["default", "secondary"];
+    let releaseSecondaryBuild: (() => void) | undefined;
+    const secondaryBuildBlocked = new Promise<void>((resolve) => {
+      releaseSecondaryBuild = resolve;
+    });
+    mocks.ensureOpenClawModelsJson.mockImplementationOnce(async () => {
+      await secondaryBuildBlocked;
+      return { agentDir: "/tmp/configured-secondary", wrote: false };
+    });
+
+    const degradedRefresh = refreshPreparedModelRuntimeSnapshots(config, {
+      agentIds: new Set(["secondary"]),
+      catalogMode: "static",
+      gatewayLifecycle: true,
+      startup: true,
+    });
+    await expect(degradedRefresh).resolves.toBeUndefined();
+    await expect(
+      replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch(initialDefault),
+    ).resolves.toBe(false);
+
+    releaseSecondaryBuild?.();
+    await vi.waitFor(() =>
+      expect(
+        getPreparedModelRuntimeSnapshot({
+          agentId: "secondary",
+          config,
+          agentDir: "/tmp/configured-secondary",
+          inheritedAuthDir: "/tmp/unused-agent",
+          workspaceDir: "/tmp/workspace-secondary",
+        }),
+      ).toMatchObject({ agentId: "secondary" }),
+    );
+    expect(getPreparedModelRuntimeSnapshot(defaultInput)).not.toBe(initialDefault);
   });
 });

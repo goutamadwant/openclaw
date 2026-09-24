@@ -16,7 +16,7 @@ import {
 import { PreparedModelCatalogGenerationRecoveryOwner } from "./prepared-model-runtime.catalog-generation-recovery.js";
 import {
   advancePreparedModelRuntimeOwnersConfig,
-  refreshPreparedModelRuntimeOwnerCatalog,
+  createPreparedModelRuntimeCatalogRefresh,
 } from "./prepared-model-runtime.catalog.js";
 import { refreshPreparedModelRuntimeSnapshotsNow } from "./prepared-model-runtime.configured-refresh.js";
 import {
@@ -71,10 +71,7 @@ import {
 } from "./prepared-model-runtime.retention.js";
 import { setPreparedModelRuntimeStartupStatus } from "./prepared-model-runtime.startup-status.js";
 import { PreparedModelRuntimeStartup } from "./prepared-model-runtime.startup.js";
-import type {
-  PreparedModelCatalogRefreshOptions,
-  PreparedModelRuntimeLeaseOptions,
-} from "./prepared-model-runtime.types.js";
+import type { PreparedModelRuntimeLeaseOptions } from "./prepared-model-runtime.types.js";
 import { PreparedReplyDispatchPublicationOwner } from "./prepared-reply-dispatch-runtime.js";
 export {
   PreparedModelRuntimeOwnerNotPublishedError,
@@ -428,12 +425,7 @@ export async function prepareModelRuntimeSnapshot(
 }
 
 /** Initializes or refreshes inventory on catalog demand; turn admission remains static. */
-export async function refreshPreparedModelRuntimeCatalog(
-  snapshot: PreparedModelRuntimeSnapshot,
-  options: PreparedModelCatalogRefreshOptions = {},
-): ReturnType<typeof refreshPreparedModelRuntimeOwnerCatalog> {
-  return await refreshPreparedModelRuntimeOwnerCatalog(owners, snapshot, options);
-}
+export const refreshPreparedModelRuntimeCatalog = createPreparedModelRuntimeCatalogRefresh(owners);
 
 /** Invalidates every published generation before config/plugin runtime replacement. */
 export function markPreparedModelRuntimeSnapshotsStale(
@@ -468,7 +460,11 @@ export function markPreparedModelRuntimeSnapshotsStale(
   });
   // Fence epochs and admission before cancellation can reenter a plugin callback.
   previousCancellation.abort(new PreparedModelRuntimePublicationSupersededError(reason));
-  notifyPreparedModelRuntimePublication({ phase: "invalidated" });
+  const replacement = getBlockingReplacement();
+  notifyPreparedModelRuntimePublication({
+    phase: "invalidated",
+    ...(replacement ? { replacement: replacement.promise } : {}),
+  });
   if (!pendingModelRuntimeReplacement) {
     notifyPreparedModelRuntimePublication({ phase: "failed", error: staleError });
   }
@@ -477,7 +473,7 @@ export function markPreparedModelRuntimeSnapshotsStale(
 
 export async function replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch(
   snapshot: PreparedModelRuntimeSnapshot,
-): Promise<boolean> {
+) {
   return await catalogGenerationRecovery.replace(snapshot, {
     owners,
     agentBuildCompletions,
@@ -657,7 +653,7 @@ export function refreshPreparedModelRuntimeSnapshots(
       }
       throw refreshError;
     });
-  return startup ? startup.wait(publication) : publication;
+  return publicationQueue.complete(publication, isPublicationCurrent, options, startup);
 }
 
 async function drainAuth(
@@ -667,14 +663,14 @@ async function drainAuth(
 ): Promise<void> {
   await authPublication.drain({
     owners,
-    publish: async (ownersToPublish, includeCredentialProviders) =>
+    publish: async (ownersToPublish, includeCredentialProviders, reuseGenerations) =>
       await publishPreparedModelRuntimeOwnerBatch({
         ownersToPublish,
         owners,
         agentBuildCompletions,
         buildTimeoutMs: modelRuntimeBuildTimeoutMs,
         ...(includeCredentialProviders ? { includeCredentialProviders: true } : {}),
-        selectPluginGeneration: (owner) => owner.pluginGeneration,
+        selectPluginGeneration: reuseGenerations ? (owner) => owner.pluginGeneration : undefined,
       }),
     publishOwners: (publishedOwners) => replyDispatchPublication.replace(publishedOwners),
     commit,

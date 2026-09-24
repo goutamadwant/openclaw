@@ -1,3 +1,4 @@
+import { PluginInstanceUnavailableError } from "../plugins/plugin-instance-error.js";
 import type { PreparedModelRuntimeInput } from "./prepared-model-runtime.types.js";
 
 export class PreparedModelRuntimeOwnerNotPublishedError extends Error {}
@@ -14,6 +15,16 @@ export class PreparedModelCatalogGenerationMismatchError extends Error {
     );
     this.name = "PreparedModelCatalogGenerationMismatchError";
   }
+}
+
+export class PreparedModelRuntimePluginGenerationRetiredError extends Error {}
+
+export function isPreparedModelRuntimePluginLifecycleFailure(error: unknown): boolean {
+  return (
+    error instanceof PluginInstanceUnavailableError ||
+    error instanceof PreparedModelRuntimePluginGenerationRetiredError ||
+    error instanceof PreparedModelRuntimePublicationSupersededError
+  );
 }
 
 export function assertPreparedModelRuntimeInputCurrent(

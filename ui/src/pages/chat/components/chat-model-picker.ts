@@ -19,6 +19,7 @@ import {
 import type { ChatModelAccountSection } from "./chat-model-account-control.ts";
 import {
   type ChatModelCatalogState,
+  renderChatModelCatalogRefresh,
   renderChatModelCatalogState,
 } from "./chat-model-catalog-state.ts";
 import {
@@ -339,6 +340,11 @@ export function renderChatModelPicker(params: ChatModelPickerParams) {
                                 updateModelSearch(event.currentTarget as HTMLInputElement)}
                               @keydown=${handleModelSearchKeydown}
                             />
+                            ${
+                              params.modelOptions.length > 0
+                                ? renderChatModelCatalogRefresh(params.modelCatalogState)
+                                : nothing
+                            }
                           </div>
                         `
                       : nothing
@@ -539,6 +545,13 @@ export function renderChatModelPicker(params: ChatModelPickerParams) {
             params.modelSelectionLocked && params.accountSection
               ? html`<div class="chat-controls__model-options">
                   ${params.accountSection.render(0)}
+                </div>`
+              : nothing
+          }
+          ${
+            params.modelCatalogState?.modelSelectionPolicy?.restricted
+              ? html`<div class="chat-controls__model-catalog-state" data-chat-model-policy>
+                  ${t("chat.modelControls.restrictedModelsHelp")}
                 </div>`
               : nothing
           }

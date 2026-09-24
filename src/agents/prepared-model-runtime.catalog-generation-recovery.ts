@@ -29,6 +29,21 @@ type RecoveryDependencies = {
   ) => Promise<void>;
 };
 
+function wasSnapshotSuperseded(
+  snapshot: PreparedModelRuntimeSnapshot,
+  dependencies: RecoveryDependencies,
+): boolean {
+  const owner = resolvePreparedModelRuntimeOwnerBySnapshot(snapshot);
+  if (
+    owner &&
+    (dependencies.owners.get(ownerKey(owner.input)) !== owner || owner.snapshot !== snapshot)
+  ) {
+    return true;
+  }
+  const replacement = resolveConfiguredOwner(dependencies.owners, snapshot);
+  return Boolean(replacement?.snapshot && replacement.snapshot !== snapshot);
+}
+
 export class PreparedModelCatalogGenerationRecoveryOwner {
   #recoveries = new WeakMap<PreparedModelRuntimeOwner, Promise<void>>();
 
@@ -42,13 +57,7 @@ export class PreparedModelCatalogGenerationRecoveryOwner {
   ): Promise<boolean> {
     const owner = resolvePreparedModelRuntimeOwnerBySnapshot(snapshot);
     if (!owner) {
-      const replacement = resolveConfiguredOwner(dependencies.owners, snapshot);
-      return Boolean(
-        replacement?.snapshot &&
-        replacement.snapshot !== snapshot &&
-        !replacement.needsRefresh &&
-        !replacement.pending,
-      );
+      return wasSnapshotSuperseded(snapshot, dependencies);
     }
     if (
       dependencies.owners.get(ownerKey(owner.input)) !== owner ||
@@ -59,12 +68,12 @@ export class PreparedModelCatalogGenerationRecoveryOwner {
     const activeRecovery = this.#recoveries.get(owner);
     if (activeRecovery) {
       await activeRecovery;
-      return true;
+      return wasSnapshotSuperseded(snapshot, dependencies);
     }
     const pendingReplacement = dependencies.getPendingReplacement();
     if (pendingReplacement) {
       await pendingReplacement.promise;
-      return true;
+      return wasSnapshotSuperseded(snapshot, dependencies);
     }
 
     const replacement = createPreparedModelRuntimeReplacement();
@@ -122,7 +131,8 @@ export class PreparedModelCatalogGenerationRecoveryOwner {
     } catch (error) {
       const refreshError = toStringifiedError(error);
       if (!isReplacementCurrent()) {
-        return true;
+        await dependencies.getPendingReplacement()?.promise;
+        return wasSnapshotSuperseded(snapshot, dependencies);
       }
       dependencies.setPendingReplacement(undefined);
       dependencies.rejectAuthPublication(replacement, refreshError);
@@ -134,6 +144,9 @@ export class PreparedModelCatalogGenerationRecoveryOwner {
         this.#recoveries.delete(owner);
       }
     }
-    return true;
+    if (!isReplacementCurrent()) {
+      await dependencies.getPendingReplacement()?.promise;
+    }
+    return wasSnapshotSuperseded(snapshot, dependencies);
   }
 }

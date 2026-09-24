@@ -32,11 +32,8 @@ import type { PluginToolIcons } from "../chat-tool-icon-controller.ts";
 import "./chat-clawhub-card.ts";
 import type { LinkFaviconFetcher } from "../link-favicon-loader.ts";
 import { workspaceResultConflictFromTranscript } from "../workspace-conflict.ts";
-import {
-  readAsyncQuestions,
-  renderAsyncQuestionSummary,
-  type AsyncQuestionPresentation,
-} from "./chat-async-question.ts";
+import { readAsyncQuestions, renderAsyncQuestionSummary } from "./chat-async-question.ts";
+import type { AsyncQuestionPresentation } from "./chat-async-question.types.ts";
 import {
   renderAssistantAttachments,
   renderMessageAttachment,
@@ -136,17 +133,21 @@ function renderPairingQrExpiryNotices(count: number) {
           <div
             class="chat-assistant-attachment-card chat-assistant-attachment-card--blocked chat-pairing-qr-expired"
           >
-            <div class="chat-assistant-attachment-card__header">
-              <span class="chat-assistant-attachment-card__icon">${icons.alertTriangle}</span>
-              <span class="chat-assistant-attachment-card__title"
-                >${t("chat.pairingQrExpired.title")}</span
-              >
-              <span class="chat-assistant-attachment-badge chat-assistant-attachment-badge--muted"
-                >${t("chat.pairingQrExpired.badge")}</span
-              >
-            </div>
-            <div class="chat-assistant-attachment-card__reason">
-              ${t("chat.pairingQrExpired.reason")}
+            <span class="chat-pairing-qr-expired__icon" aria-hidden="true"
+              >${icons.alertTriangle}</span
+            >
+            <div class="chat-pairing-qr-expired__content">
+              <div class="chat-pairing-qr-expired__heading">
+                <span class="chat-pairing-qr-expired__title"
+                  >${t("chat.pairingQrExpired.title")}</span
+                >
+                <span class="chat-pairing-qr-expired__badge"
+                  >${t("chat.pairingQrExpired.badge")}</span
+                >
+              </div>
+              <div class="chat-assistant-attachment-card__reason">
+                ${t("chat.pairingQrExpired.reason")}
+              </div>
             </div>
           </div>
         `,
@@ -227,7 +228,8 @@ export function renderGroupedMessage(
   const isStandaloneToolMessage = isStandaloneToolMessageForDisplay(message);
 
   const toolCards = (opts.showToolCalls ?? true) ? extractToolCardsCached(message) : [];
-  const hasToolCards = toolCards.length > 0;
+  // Nested cards moved under their parent must not leave empty message shells.
+  const hasToolCards = toolCards.some((card) => opts.toolCardOverrides?.get(card) !== nothing);
   const {
     images,
     attachments: visibleAttachments,
@@ -333,7 +335,7 @@ export function renderGroupedMessage(
     .filter(Boolean)
     .join(" ");
 
-  // Suppress empty bubbles when tool cards are the only content and toggle is off
+  // Suppress bubbles with no visible content, including relocated tool cards.
   if (
     !markdown &&
     !asyncQuestions &&
@@ -454,10 +456,6 @@ export function renderGroupedMessage(
     visibleAttachments.length === 0 &&
     assistantViewBlocks.length === 0 &&
     !reasoningMarkdown;
-
-  if (onlyToolCards && toolCards.every((card) => opts.toolCardOverrides?.get(card) === nothing)) {
-    return nothing;
-  }
 
   const toolRenderOptions = { ...opts, messageKey, onOpenSidebar };
   const renderText = () =>
