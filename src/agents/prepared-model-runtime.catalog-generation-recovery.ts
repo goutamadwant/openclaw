@@ -1,5 +1,8 @@
 import { toStringifiedError } from "@openclaw/normalization-core/error-coercion";
-import { createPreparedModelRuntimeReplacement } from "./prepared-model-runtime.lifecycle.js";
+import {
+  createPreparedModelRuntimeReplacement,
+  retirePreparedModelRuntimeGeneration,
+} from "./prepared-model-runtime.lifecycle.js";
 import {
   ownerKey,
   publishPreparedModelRuntimeOwnerBatch,
@@ -9,6 +12,7 @@ import {
   type PreparedModelRuntimeReplacement,
   type PreparedModelRuntimeSnapshot,
 } from "./prepared-model-runtime.owner.js";
+import { releasePreparedPluginPublication } from "./prepared-model-runtime.plugin-lifetime.js";
 import { notifyPreparedModelRuntimePublication } from "./prepared-model-runtime.publication-events.js";
 
 type RecoveryDependencies = {
@@ -84,9 +88,11 @@ export class PreparedModelCatalogGenerationRecoveryOwner {
       `prepared model runtime catalog generation was invalid for ${owner.input.agentDir}`,
     );
     owner.generation += 1;
+    retirePreparedModelRuntimeGeneration(owner);
     owner.needsRefresh = true;
     owner.refreshError = staleError;
     owner.pluginGeneration = undefined;
+    releasePreparedPluginPublication(owner);
     if (owner.input.agentId) {
       dependencies.removeReplyDispatch(new Set([owner.input.agentId]));
     }

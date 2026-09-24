@@ -19,6 +19,9 @@ import {
   refreshPreparedModelRuntimeSnapshots,
   replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch,
 } from "./prepared-model-runtime.js";
+import { capturePreparedModelRuntimeGeneration } from "./prepared-model-runtime.lifecycle.js";
+import { resolvePreparedModelRuntimeOwnerBySnapshot } from "./prepared-model-runtime.owner.js";
+import { hasPreparedPluginPublicationForTest } from "./prepared-model-runtime.plugin-lifetime.js";
 
 const mocks = getPreparedModelRuntimeMocks();
 let state: OpenClawTestState;
@@ -52,7 +55,6 @@ describe("prepared model runtime catalog recovery", () => {
     if (!initialDefault) {
       throw new Error("default prepared model runtime owner was not published");
     }
-
     const recovery =
       replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch(initialDefault);
     mocks.mutationListener?.({
@@ -335,7 +337,6 @@ describe("prepared model runtime catalog recovery", () => {
     if (!initialDefault) {
       throw new Error("default prepared model runtime owner was not published");
     }
-
     let signalRecoveryBuildStarted: (() => void) | undefined;
     const recoveryBuildStarted = new Promise<void>((resolve) => {
       signalRecoveryBuildStarted = resolve;
@@ -509,6 +510,13 @@ describe("prepared model runtime catalog recovery", () => {
     if (!initialDefault) {
       throw new Error("default prepared model runtime owner was not published");
     }
+    const initialOwner = resolvePreparedModelRuntimeOwnerBySnapshot(initialDefault);
+    expect(initialOwner).toBeDefined();
+    if (!initialOwner) {
+      throw new Error("default prepared model runtime owner was not retained");
+    }
+    const retirement = capturePreparedModelRuntimeGeneration(initialOwner);
+    expect(hasPreparedPluginPublicationForTest(initialOwner)).toBe(true);
 
     let signalRecoveryBuildStarted: (() => void) | undefined;
     const recoveryBuildStarted = new Promise<void>((resolve) => {
@@ -532,22 +540,28 @@ describe("prepared model runtime catalog recovery", () => {
     const recovery =
       replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch(initialDefault);
     await recoveryBuildStarted;
-    const healthyDispatch = loadPublishedGatewayReplyDispatchRuntime({ agentId: "secondary" });
-    const healthyRuntime = prepareModelRuntimeSnapshot({
-      agentId: "secondary",
-      config,
-      agentDir: "/tmp/configured-secondary",
-      inheritedAuthDir: "/tmp/unused-agent",
-      workspaceDir: "/tmp/workspace-secondary",
-    });
-    releaseRecoveryBuild?.();
+    try {
+      expect(retirement.aborted).toBe(true);
+      expect(hasPreparedPluginPublicationForTest(initialOwner)).toBe(false);
+      const healthyDispatch = loadPublishedGatewayReplyDispatchRuntime({ agentId: "secondary" });
+      const healthyRuntime = prepareModelRuntimeSnapshot({
+        agentId: "secondary",
+        config,
+        agentDir: "/tmp/configured-secondary",
+        inheritedAuthDir: "/tmp/unused-agent",
+        workspaceDir: "/tmp/workspace-secondary",
+      });
+      releaseRecoveryBuild?.();
 
-    await expect(recovery).rejects.toBe(recoveryError);
-    await expect(loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" })).rejects.toThrow(
-      "prepared reply dispatch runtime owner was not published for default",
-    );
-    await expect(healthyDispatch).resolves.toMatchObject({ agentId: "secondary" });
-    await expect(healthyRuntime).resolves.toMatchObject({ agentId: "secondary" });
+      await expect(recovery).rejects.toBe(recoveryError);
+      await expect(
+        loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" }),
+      ).rejects.toThrow("prepared reply dispatch runtime owner was not published for default");
+      await expect(healthyDispatch).resolves.toMatchObject({ agentId: "secondary" });
+      await expect(healthyRuntime).resolves.toMatchObject({ agentId: "secondary" });
+    } finally {
+      releaseRecoveryBuild?.();
+    }
   });
 
   it("defers to a config replacement that supersedes recovery", async () => {
