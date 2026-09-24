@@ -21,7 +21,6 @@ import {
 } from "./prepared-model-runtime.js";
 import { capturePreparedModelRuntimeGeneration } from "./prepared-model-runtime.lifecycle.js";
 import { resolvePreparedModelRuntimeOwnerBySnapshot } from "./prepared-model-runtime.owner.js";
-import { hasPreparedPluginPublicationForTest } from "./prepared-model-runtime.plugin-lifetime.js";
 
 const mocks = getPreparedModelRuntimeMocks();
 let state: OpenClawTestState;
@@ -516,7 +515,9 @@ describe("prepared model runtime catalog recovery", () => {
       throw new Error("default prepared model runtime owner was not retained");
     }
     const retirement = capturePreparedModelRuntimeGeneration(initialOwner);
-    expect(hasPreparedPluginPublicationForTest(initialOwner)).toBe(true);
+    expect(getPreparedModelRuntimeTestApi().hasPreparedPluginPublicationForTest(initialOwner)).toBe(
+      true,
+    );
 
     let signalRecoveryBuildStarted: (() => void) | undefined;
     const recoveryBuildStarted = new Promise<void>((resolve) => {
@@ -542,7 +543,9 @@ describe("prepared model runtime catalog recovery", () => {
     await recoveryBuildStarted;
     try {
       expect(retirement.aborted).toBe(true);
-      expect(hasPreparedPluginPublicationForTest(initialOwner)).toBe(false);
+      expect(
+        getPreparedModelRuntimeTestApi().hasPreparedPluginPublicationForTest(initialOwner),
+      ).toBe(false);
       const healthyDispatch = loadPublishedGatewayReplyDispatchRuntime({ agentId: "secondary" });
       const healthyRuntime = prepareModelRuntimeSnapshot({
         agentId: "secondary",

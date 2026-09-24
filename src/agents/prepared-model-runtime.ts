@@ -47,7 +47,10 @@ import {
   type PreparedModelRuntimeReplacementGateId,
   type PreparedModelRuntimeSnapshot,
 } from "./prepared-model-runtime.owner.js";
-import { releasePreparedPluginPublication } from "./prepared-model-runtime.plugin-lifetime.js";
+import {
+  hasPreparedPluginPublicationForTest,
+  releasePreparedPluginPublication,
+} from "./prepared-model-runtime.plugin-lifetime.js";
 import {
   notifyPreparedModelRuntimePublication,
   reportPreparedModelRuntimeAuthRefreshFailure,
@@ -761,6 +764,7 @@ if (process.env.VITEST || process.env.NODE_ENV === "test") {
     {
       resetPreparedModelRuntimeSnapshotsForTest,
       getPreparedModelRuntimeOwnerCountForTest: () => owners.size,
+      hasPreparedPluginPublicationForTest,
       setModelRuntimeBuildTimeoutMsForTest: (timeoutMs: number) => {
         modelRuntimeBuildTimeoutMs = timeoutMs;
       },
