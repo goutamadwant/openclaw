@@ -1,6 +1,6 @@
 import type { PreparedModelRuntimeCatalogAccessParams } from "./prepared-model-runtime.catalog-contract.js";
 import { PreparedModelCatalogGenerationMismatchError } from "./prepared-model-runtime.errors.js";
-import { resolvePreparedModelRuntimeOwnerBySnapshot } from "./prepared-model-runtime.owner.js";
+import { resolvePreparedModelRuntimeOwnerBySnapshot } from "./prepared-model-runtime.owner-registry.js";
 
 export function createPreparedModelCatalogGenerationRecoveryHandler(
   params: Pick<PreparedModelRuntimeCatalogAccessParams, "agentFacts" | "inventoryOwner">,

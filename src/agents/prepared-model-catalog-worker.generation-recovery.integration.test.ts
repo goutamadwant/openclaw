@@ -22,48 +22,50 @@ describe("prepared model catalog generation recovery", () => {
       "run",
     ) as (typeof WorkerTaskPool)["prototype"]["run"];
     let injectMismatch = false;
-    const runSpy = vi
-      .spyOn(WorkerTaskPool.prototype, "run")
-      .mockImplementation(function (this: (typeof WorkerTaskPool)["prototype"], input, runOptions) {
-        if (typeof input !== "function") {
-          return run.call(this, input, runOptions);
-        }
-        return run.call(
-          this,
-          async () => {
-            const task = await input();
-            if (
-              !injectMismatch ||
-              typeof task !== "object" ||
-              task === null ||
-              !("value" in task) ||
-              !("request" in task) ||
-              typeof task.value !== "object" ||
-              task.value === null ||
-              !("input" in task.value) ||
-              typeof task.value.input !== "object" ||
-              task.value.input === null ||
-              !("agentDir" in task.value.input) ||
-              task.value.input.agentDir !== fixture.agentDir ||
-              typeof task.request !== "object" ||
-              task.request === null ||
-              !("kind" in task.request) ||
-              task.request.kind !== "catalog"
-            ) {
-              return task;
-            }
-            injectMismatch = false;
-            return {
-              ...task,
-              value: {
-                ...task.value,
-                generationFingerprint: "configured-owner-generation-drifted",
-              },
-            };
-          },
-          runOptions,
-        );
-      });
+    const runSpy = vi.spyOn(WorkerTaskPool.prototype, "run").mockImplementation(function (
+      this: (typeof WorkerTaskPool)["prototype"],
+      input,
+      runOptions,
+    ) {
+      if (typeof input !== "function") {
+        return run.call(this, input, runOptions);
+      }
+      return run.call(
+        this,
+        async () => {
+          const task = await input();
+          if (
+            !injectMismatch ||
+            typeof task !== "object" ||
+            task === null ||
+            !("value" in task) ||
+            !("request" in task) ||
+            typeof task.value !== "object" ||
+            task.value === null ||
+            !("input" in task.value) ||
+            typeof task.value.input !== "object" ||
+            task.value.input === null ||
+            !("agentDir" in task.value.input) ||
+            task.value.input.agentDir !== fixture.agentDir ||
+            typeof task.request !== "object" ||
+            task.request === null ||
+            !("kind" in task.request) ||
+            task.request.kind !== "catalog"
+          ) {
+            return task;
+          }
+          injectMismatch = false;
+          return {
+            ...task,
+            value: {
+              ...task.value,
+              generationFingerprint: "configured-owner-generation-drifted",
+            },
+          };
+        },
+        runOptions,
+      );
+    });
     try {
       await expectPublishedOwnerRecoveryAfterGenerationMismatch(
         fixture,
