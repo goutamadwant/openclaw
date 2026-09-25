@@ -58,14 +58,37 @@ export class PreparedModelCatalogGenerationRecoveryOwner {
   async replace(
     snapshot: PreparedModelRuntimeSnapshot,
     dependencies: RecoveryDependencies,
+    identity?: readonly [owner: PreparedModelRuntimeOwner, generation: number],
   ): Promise<boolean> {
-    const owner = resolvePreparedModelRuntimeOwnerBySnapshot(snapshot);
+    const owner = identity?.[0] ?? resolvePreparedModelRuntimeOwnerBySnapshot(snapshot);
     if (!owner) {
       return wasSnapshotSuperseded(snapshot, dependencies);
     }
+    return await this.replaceOwnedSnapshot(
+      {
+        owner,
+        generation: identity?.[1] ?? owner.generation,
+        snapshot,
+        preserveCapturedGeneration: identity !== undefined,
+      },
+      dependencies,
+    );
+  }
+
+  async replaceOwnedSnapshot(
+    identity: {
+      owner: PreparedModelRuntimeOwner;
+      generation: number;
+      snapshot: PreparedModelRuntimeSnapshot;
+      preserveCapturedGeneration: boolean;
+    },
+    dependencies: RecoveryDependencies,
+  ): Promise<boolean> {
+    const { owner, generation, snapshot, preserveCapturedGeneration } = identity;
     if (
       dependencies.owners.get(ownerKey(owner.input)) !== owner ||
-      owner.provenance !== "configured"
+      owner.provenance !== "configured" ||
+      owner.generation !== generation
     ) {
       return false;
     }
@@ -74,10 +97,27 @@ export class PreparedModelCatalogGenerationRecoveryOwner {
       await activeRecovery;
       return wasSnapshotSuperseded(snapshot, dependencies);
     }
-    const pendingReplacement = dependencies.getPendingReplacement();
-    if (pendingReplacement) {
-      await pendingReplacement.promise;
-      return wasSnapshotSuperseded(snapshot, dependencies);
+    let pendingReplacement = dependencies.getPendingReplacement();
+    while (pendingReplacement) {
+      try {
+        await pendingReplacement.promise;
+      } catch (error) {
+        if (!preserveCapturedGeneration) {
+          throw error;
+        }
+      }
+      if (
+        !preserveCapturedGeneration ||
+        dependencies.owners.get(ownerKey(owner.input)) !== owner ||
+        owner.generation !== generation
+      ) {
+        return wasSnapshotSuperseded(snapshot, dependencies);
+      }
+      const newerReplacement = dependencies.getPendingReplacement();
+      if (!newerReplacement || newerReplacement === pendingReplacement) {
+        break;
+      }
+      pendingReplacement = newerReplacement;
     }
 
     const replacement = createPreparedModelRuntimeReplacement();

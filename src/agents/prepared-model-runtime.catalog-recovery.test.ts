@@ -21,6 +21,7 @@ import {
 } from "./prepared-model-runtime.js";
 import { capturePreparedModelRuntimeGeneration } from "./prepared-model-runtime.lifecycle.js";
 import { resolvePreparedModelRuntimeOwnerBySnapshot } from "./prepared-model-runtime.owner.js";
+import { registerPreparedModelRuntimePublicationListener } from "./prepared-model-runtime.publication-events.js";
 
 const mocks = getPreparedModelRuntimeMocks();
 let state: OpenClawTestState;
@@ -173,6 +174,44 @@ describe("prepared model runtime catalog recovery", () => {
     releaseAuthBuild?.();
 
     await expect(recovery).resolves.toBe(true);
+    await expect(
+      loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" }),
+    ).resolves.toMatchObject({ agentId: "default", config: stampedConfig });
+  });
+
+  it("continues recovery when a config stamp replaces the snapshot before async dispatch", async () => {
+    mocks.configuredAgentIds = ["default"];
+    const config = {};
+    await refreshPreparedModelRuntimeSnapshots(config, { gatewayLifecycle: true });
+    const defaultInput = {
+      agentId: "default",
+      config,
+      agentDir: "/tmp/unused-agent",
+      inheritedAuthDir: "/tmp/unused-agent",
+      workspaceDir: "/tmp/unused-workspace",
+    };
+    const initialDefault = getPreparedModelRuntimeSnapshot(defaultInput);
+    expect(initialDefault).toBeDefined();
+    if (!initialDefault) {
+      throw new Error("default prepared model runtime owner was not published");
+    }
+    const owner = resolvePreparedModelRuntimeOwnerBySnapshot(initialDefault);
+    expect(owner).toBeDefined();
+    if (!owner) {
+      throw new Error("default prepared model runtime snapshot had no owner");
+    }
+    const generation = owner.generation;
+
+    const stampedConfig = { logging: { level: "debug" as const } };
+    advancePreparedModelRuntimeConfig(stampedConfig);
+    expect(resolvePreparedModelRuntimeOwnerBySnapshot(initialDefault)).toBeUndefined();
+
+    await expect(
+      replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch(initialDefault, [
+        owner,
+        generation,
+      ]),
+    ).resolves.toBe(true);
     await expect(
       loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" }),
     ).resolves.toMatchObject({ agentId: "default", config: stampedConfig });
@@ -670,5 +709,93 @@ describe("prepared model runtime catalog recovery", () => {
       ).toMatchObject({ agentId: "secondary" }),
     );
     expect(getPreparedModelRuntimeSnapshot(defaultInput)).not.toBe(initialDefault);
+  });
+
+  it("recovers a captured generation after a newer unrelated replacement fails", async () => {
+    mocks.configuredAgentIds = ["default", "secondary", "tertiary"];
+    const config = {};
+    await refreshPreparedModelRuntimeSnapshots(config, { gatewayLifecycle: true });
+    const defaultInput = {
+      agentId: "default",
+      config,
+      agentDir: "/tmp/unused-agent",
+      inheritedAuthDir: "/tmp/unused-agent",
+      workspaceDir: "/tmp/unused-workspace",
+    };
+    const initialDefault = getPreparedModelRuntimeSnapshot(defaultInput);
+    expect(initialDefault).toBeDefined();
+    if (!initialDefault) {
+      throw new Error("default prepared model runtime owner was not published");
+    }
+    const owner = resolvePreparedModelRuntimeOwnerBySnapshot(initialDefault);
+    expect(owner).toBeDefined();
+    if (!owner) {
+      throw new Error("default prepared model runtime snapshot had no owner");
+    }
+    const generation = owner.generation;
+    const secondaryInput = {
+      agentId: "secondary",
+      config,
+      agentDir: "/tmp/configured-secondary",
+      inheritedAuthDir: "/tmp/unused-agent",
+      workspaceDir: "/tmp/workspace-secondary",
+    };
+    const initialSecondary = getPreparedModelRuntimeSnapshot(secondaryInput);
+    expect(initialSecondary).toBeDefined();
+    if (!initialSecondary) {
+      throw new Error("secondary prepared model runtime owner was not published");
+    }
+
+    let signalSecondaryBuildStarted: (() => void) | undefined;
+    const secondaryBuildStarted = new Promise<void>((resolve) => {
+      signalSecondaryBuildStarted = resolve;
+    });
+    let releaseSecondaryBuild: (() => void) | undefined;
+    const secondaryBuildBlocked = new Promise<void>((resolve) => {
+      releaseSecondaryBuild = resolve;
+    });
+    mocks.ensureOpenClawModelsJson.mockImplementationOnce(async () => {
+      signalSecondaryBuildStarted?.();
+      await secondaryBuildBlocked;
+      return { agentDir: "/tmp/configured-secondary", wrote: false };
+    });
+    const newerReplacementError = new Error("tertiary replacement failed");
+    mocks.ensureOpenClawModelsJson.mockImplementationOnce(async () => {
+      throw newerReplacementError;
+    });
+
+    const secondaryRecovery =
+      replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch(initialSecondary);
+    await secondaryBuildStarted;
+    const stampedConfig = { logging: { level: "debug" as const } };
+    advancePreparedModelRuntimeConfig(stampedConfig);
+    expect(resolvePreparedModelRuntimeOwnerBySnapshot(initialDefault)).toBeUndefined();
+
+    const defaultRecovery = replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch(
+      initialDefault,
+      [owner, generation],
+    );
+    let newerReplacement: Promise<void> | undefined;
+    const unsubscribe = registerPreparedModelRuntimePublicationListener((event) => {
+      if (event.phase === "published" && !newerReplacement) {
+        newerReplacement = refreshPreparedModelRuntimeSnapshots(stampedConfig, {
+          agentIds: new Set(["tertiary"]),
+          gatewayLifecycle: true,
+        });
+        void newerReplacement.catch(() => {});
+      }
+    });
+
+    try {
+      releaseSecondaryBuild?.();
+      await expect(secondaryRecovery).rejects.toBe(newerReplacementError);
+      await expect(newerReplacement).rejects.toBe(newerReplacementError);
+      await expect(defaultRecovery).resolves.toBe(true);
+      await expect(
+        loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" }),
+      ).resolves.toMatchObject({ agentId: "default", config: stampedConfig });
+    } finally {
+      unsubscribe();
+    }
   });
 });

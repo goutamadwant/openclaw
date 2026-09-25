@@ -474,29 +474,31 @@ export function markPreparedModelRuntimeSnapshotsStale(
   return pendingModelRuntimeReplacement?.gateId;
 }
 
+// oxfmt-ignore
 export async function replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch(
-  snapshot: PreparedModelRuntimeSnapshot,
+  snapshot: PreparedModelRuntimeSnapshot, identity?: readonly [owner: PreparedModelRuntimeOwner, generation: number],
 ) {
+  // oxfmt-ignore
   return await catalogGenerationRecovery.replace(snapshot, {
-    owners,
-    agentBuildCompletions,
-    buildTimeoutMs: modelRuntimeBuildTimeoutMs,
-    getPendingReplacement: () => pendingModelRuntimeReplacement,
-    setPendingReplacement: (replacement) => (pendingModelRuntimeReplacement = replacement),
-    adoptAuthPublication: (replacement) => authPublication.adopt(replacement.gateId),
-    commitReplacement: (replacement) => {
-      authPublication.commitAdopted(replacement, owners, () => {
-        replyDispatchPublication.replacePublished(owners.values());
-        pendingModelRuntimeReplacement = undefined;
-      });
-      notifyPreparedModelRuntimePublication({ phase: "published" });
-    },
-    rejectAuthPublication: (replacement, error) =>
-      authPublication.rejectAdopted(replacement.gateId, error),
-    removeReplyDispatch: (agentIds) => replyDispatchPublication.remove(agentIds),
-    enqueuePublication: (task) => publicationQueue.enqueue(task),
-    drainPendingAuthMutations: (commit, required, error) => drainAuth(commit, required, error),
-  });
+      owners,
+      agentBuildCompletions,
+      buildTimeoutMs: modelRuntimeBuildTimeoutMs,
+      getPendingReplacement: () => pendingModelRuntimeReplacement,
+      setPendingReplacement: (replacement) => (pendingModelRuntimeReplacement = replacement),
+      adoptAuthPublication: (replacement) => authPublication.adopt(replacement.gateId),
+      commitReplacement: (replacement) => {
+        authPublication.commitAdopted(replacement, owners, () => {
+          replyDispatchPublication.replacePublished(owners.values());
+          pendingModelRuntimeReplacement = undefined;
+        });
+        notifyPreparedModelRuntimePublication({ phase: "published" });
+      },
+      rejectAuthPublication: (replacement, error) =>
+        authPublication.rejectAdopted(replacement.gateId, error),
+      removeReplyDispatch: (agentIds) => replyDispatchPublication.remove(agentIds),
+      enqueuePublication: (task) => publicationQueue.enqueue(task),
+      drainPendingAuthMutations: (commit, required, error) => drainAuth(commit, required, error),
+  }, identity);
 }
 
 /** Rejects readers waiting for a replacement when its owning reload cannot continue. */
