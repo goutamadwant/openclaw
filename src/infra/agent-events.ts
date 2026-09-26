@@ -11,6 +11,7 @@ import {
   getAgentRunContext,
   getAgentRunContextOwnership,
   getAgentRunLifecycleGeneration,
+  recordAgentRunModel,
   registerAgentRunSequenceResetHandler,
   resetAgentRunRegistryForTest,
   rotateAgentRunRegistryLifecycleGeneration,
@@ -18,18 +19,11 @@ import {
 import type { AgentRunContext } from "./agent-run-registry.types.js";
 import { recordAgentRunOutputTokens } from "./agent-run-usage.js";
 
-/** Approval event phase for request/resolution transitions. */
-type AgentApprovalEventPhase = "requested" | "resolved";
-/** Approval status after routing, user action, or delivery failure. */
-type AgentApprovalEventStatus = "pending" | "unavailable" | "approved" | "denied" | "failed";
-/** Approval family used by renderers and host hooks. */
-type AgentApprovalEventKind = "exec" | "plugin" | "unknown";
-
 /** Payload for approval requests and their later resolution events. */
 export type AgentApprovalEventData = {
-  phase: AgentApprovalEventPhase;
-  kind: AgentApprovalEventKind;
-  status: AgentApprovalEventStatus;
+  phase: "requested" | "resolved";
+  kind: "exec" | "plugin" | "unknown";
+  status: "pending" | "unavailable" | "approved" | "denied" | "failed";
   title: string;
   itemId?: string;
   toolCallId?: string;
@@ -107,7 +101,6 @@ type AgentEventState = {
   lifecycleRotationHandlers?: Map<string, (lifecycleGeneration: string) => void>;
 };
 
-const AGENT_EVENT_STATE_KEY = Symbol.for("openclaw.agentEvents.state");
 const AGENT_EVENT_ROUTING_FIELDS = [
   ["controlUiVisible", "isControlUiVisible"],
   ["projectSessionLifecycle", "projectSessionLifecycle"],
@@ -119,7 +112,8 @@ const AGENT_EVENT_ROUTING_FIELDS = [
 ] as const;
 
 function getAgentEventState(): AgentEventState {
-  return resolveGlobalSingleton<AgentEventState>(AGENT_EVENT_STATE_KEY, () => ({
+  // Lifecycle owners can register before an importing runtime chunk finishes initialization.
+  return resolveGlobalSingleton<AgentEventState>(Symbol.for("openclaw.agentEvents.state"), () => ({
     seqByRun: new Map<string, number>(),
     listeners: new Map(),
     runListeners: new Map(),
@@ -216,10 +210,11 @@ export function rotateAgentEventLifecycleGeneration(): string {
 }
 
 function enrichAgentEvent(
+  state: AgentEventState,
   event: Omit<AgentEventPayload, "seq" | "ts">,
   claimId?: string,
+  expectedContext?: AgentRunContext,
 ): AgentEventRuntimePayload | undefined {
-  const state = getAgentEventState();
   const currentLifecycleGeneration = getAgentRunLifecycleGeneration();
   const owners = getAgentRunContextOwnership(event.runId);
   if (claimId !== undefined) {
@@ -238,6 +233,9 @@ function enrichAgentEvent(
     return undefined;
   }
   const context = getAgentRunContext(event.runId);
+  if (expectedContext && context !== expectedContext) {
+    return undefined;
+  }
   const scope = getAgentEventExecutionContext().getStore();
   const executionLifecycleGeneration = event.lifecycleGeneration ?? scope?.lifecycleGeneration;
   const ownedLifecycleGeneration = executionLifecycleGeneration ?? context?.lifecycleGeneration;
@@ -257,10 +255,29 @@ function enrichAgentEvent(
   const record = scope?.routingByRun?.get(event.runId);
   const captured =
     record?.routing.lifecycleGeneration === ownedLifecycleGeneration ? record : undefined;
-  if (captured && context && captured.owner.deref() !== context) {
+  const capturedOwner = captured?.owner.deref();
+  if (captured && context && capturedOwner !== context) {
     return undefined;
   }
   const routing = context ?? captured?.routing;
+  if (event.stream === "lifecycle" && event.data.phase === "model") {
+    if (!context || (claimId === undefined && (expectedContext ?? capturedOwner) !== context)) {
+      return undefined;
+    }
+    const { provider, model } = event.data;
+    if (provider === null && model === null) {
+      recordAgentRunModel(event.runId, undefined);
+    } else if (
+      typeof provider === "string" &&
+      provider.trim() &&
+      typeof model === "string" &&
+      model.trim()
+    ) {
+      recordAgentRunModel(event.runId, { provider, model });
+    } else {
+      return undefined;
+    }
+  }
   let data = event.data;
   if (routing && event.stream === "lifecycle") {
     if (routing.completionSource) {
@@ -392,14 +409,23 @@ function* iterateAgentEventListeners(
   }
 }
 
-/** Emits an event only when its run ownership is still current. */
-export function emitAgentEventIfCurrent(event: Omit<AgentEventPayload, "seq" | "ts">): boolean {
-  const enriched = enrichAgentEvent(event);
+function dispatchAgentEvent(
+  event: Omit<AgentEventPayload, "seq" | "ts">,
+  claimId?: string,
+  expectedContext?: AgentRunContext,
+): boolean {
+  const state = getAgentEventState();
+  const enriched = enrichAgentEvent(state, event, claimId, expectedContext);
   if (!enriched) {
     return false;
   }
-  notifyListeners(iterateAgentEventListeners(getAgentEventState(), enriched), enriched);
+  notifyListeners(iterateAgentEventListeners(state, enriched), enriched);
   return true;
+}
+
+/** Emits an event only when its run ownership is still current. */
+export function emitAgentEventIfCurrent(event: Omit<AgentEventPayload, "seq" | "ts">): boolean {
+  return dispatchAgentEvent(event);
 }
 
 /** Adds one completed model call, returning its accepted run total for local callbacks. */
@@ -431,16 +457,21 @@ export function emitAgentEventForOwner(
   event: Omit<AgentEventPayload, "seq" | "ts">,
   claimId: string,
 ) {
-  const enriched = enrichAgentEvent(event, claimId);
-  if (enriched) {
-    notifyListeners(iterateAgentEventListeners(getAgentEventState(), enriched), enriched);
-  }
+  dispatchAgentEvent(event, claimId);
+}
+
+/** Emits only while the exact run-context record captured by its producer remains current. */
+export function emitAgentEventForRunContext(
+  event: Omit<AgentEventPayload, "seq" | "ts">,
+  context: AgentRunContext,
+) {
+  dispatchAgentEvent(event, undefined, context);
 }
 
 /** Emits run metadata only to the Gateway-owned durable audit projection. */
 export function emitAgentAuditEvent(event: Omit<AgentEventPayload, "seq" | "ts">) {
   const state = getAgentEventState();
-  const enriched = enrichAgentEvent(event);
+  const enriched = enrichAgentEvent(state, event);
   if (enriched) {
     notifyListeners(state.auditListeners, enriched);
     const phase = event.stream === "lifecycle" ? event.data.phase : undefined;

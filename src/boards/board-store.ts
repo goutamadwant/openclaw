@@ -65,6 +65,11 @@ export type BoardWriteOptions = {
   assertCurrent?: () => void;
 };
 
+export type BoardWidgetWriteOptions = BoardWriteOptions & {
+  /** Refresh source permission under writer admission before persisting an interactive MCP pin. */
+  resolveMcpAppInteraction?: () => Promise<boolean>;
+};
+
 export interface BoardStore {
   /** Start consumption in the authoritative read turn; release the database before awaiting its result. */
   useSnapshot<T>(
@@ -88,7 +93,7 @@ export interface BoardStore {
   ): Promise<BoardSnapshot>;
   putWidget(
     params: BoardWidgetMaterializedPutParams,
-    options?: BoardWriteOptions,
+    options?: BoardWidgetWriteOptions,
   ): Promise<BoardWidgetPutResult>;
   grant(
     target: BoardSessionTarget,
@@ -382,7 +387,11 @@ export function createBoardWidgetPutSnapshot(
                 ? "pending"
                 : "none",
       revision: widgetRevision,
-      ...(params.content.kind !== "plugin" ? { instanceId: context.instanceId } : {}),
+      // Native widget resources follow the insertion; document grants follow each put.
+      instanceId:
+        params.content.kind === "plugin"
+          ? (existing?.instanceId ?? context.instanceId)
+          : context.instanceId,
       ...(declaredSummary ? { declaredSummary } : {}),
       ...(declared ? { declared } : {}),
     },

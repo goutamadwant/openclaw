@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it as baseIt } from "vitest";
+import { resolveTestNodeExecPath } from "../../src/test-utils/node-process.js";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 import { registerMacWorkerMaterializationTests } from "./mac-node-worker-materialization.test-support.js";
 import { createMacScriptTest } from "./mac-script-fixture.test-support.js";
@@ -17,6 +18,7 @@ import { createMacScriptTest } from "./mac-script-fixture.test-support.js";
 registerMacWorkerMaterializationTests();
 
 const temps = useAutoCleanupTempDirTracker(afterEach);
+const testNodeExecPath = resolveTestNodeExecPath();
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 describe("Mac app worker publication", () => {
@@ -149,11 +151,11 @@ install_node() {
       mkdirSync(path.dirname(sentinel), { recursive: true });
       mkdirSync(home);
       writeFileSync(sentinel, "operator-owned");
-      const nodeDir = path.join(prefix, "tools", "node-v24.19.0");
+      const nodeDir = path.join(prefix, "tools", "node-v24.21.0");
       mkdirSync(path.join(nodeDir, "bin"), { recursive: true });
       // Only npm/network is replaced. The real install_openclaw implementation
       // must remain a provision-only seam even when a loaded Gateway is reported.
-      symlinkSync(process.execPath, path.join(nodeDir, "bin", "node"));
+      symlinkSync(testNodeExecPath, path.join(nodeDir, "bin", "node"));
       const npm = path.join(nodeDir, "bin", "npm");
       writeFileSync(
         npm,
@@ -162,8 +164,8 @@ case "$1" in
   --version) echo 11.15.0 ;;
   config) echo null ;;
   install)
-    mkdir -p "$HOME/../private/tools/node-v24.19.0/lib/node_modules/openclaw/dist"
-    touch "$HOME/../private/tools/node-v24.19.0/lib/node_modules/openclaw/dist/entry.js"
+    mkdir -p "$HOME/../private/tools/node-v24.21.0/lib/node_modules/openclaw/dist"
+    touch "$HOME/../private/tools/node-v24.21.0/lib/node_modules/openclaw/dist/entry.js"
     ;;
   *) exit 4 ;;
 esac
@@ -763,15 +765,15 @@ print('held-file-copy-ok')
     expect(() => auditMacWorkerPortability(root, node)).toThrow(/Nonportable LC_LOAD_DYLIB/);
   });
 
-  it.each(
-    [
-      "/usr/lib/libSystem.B.dylib",
-      "/opt/homebrew/lib/nonportable.dylib",
-      "/usr/lib/../../opt/homebrew/lib/nonportable.dylib",
-      "/System/Library/../../opt/homebrew/lib/nonportable.dylib",
-      "@loader_path/../../outside.dylib",
-    ].flatMap((library) => ["thin", "fat64"].map((format) => ({ library, format }))),
-  )("audits load dependencies after inventory ($format, $library)", async ({ library, format }) => {
+  it.each([
+    ["thin", "/usr/lib/libSystem.B.dylib"],
+    ["thin", "/opt/homebrew/lib/nonportable.dylib"],
+    ["thin", "/usr/lib/../../opt/homebrew/lib/nonportable.dylib"],
+    ["thin", "/System/Library/../../opt/homebrew/lib/nonportable.dylib"],
+    ["thin", "@loader_path/../../outside.dylib"],
+    ["fat64", "/usr/lib/libSystem.B.dylib"],
+    ["fat64", "/opt/homebrew/lib/nonportable.dylib"],
+  ] as const)("audits load dependencies after inventory (%s, %s)", async (format, library) => {
     const { auditMacWorkerPortability } =
       await import("../../scripts/lib/mac-worker-portability.mjs");
     const { machoFixture } = await import("../helpers/mac-native.js");

@@ -141,7 +141,7 @@ extension SettingsProTab {
             self.gatewaySetupCard
             self.pairedGatewaysCard
 
-            self.detailListCard {
+            Section {
                 SettingsDetailRow("Address", value: .verbatim(self.gatewayAddress))
                 SettingsDetailRow("Server", value: .verbatim(self.gatewayServer))
                 SettingsDetailRow(
@@ -348,7 +348,9 @@ extension SettingsProTab {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .accessibilityLabel("Review exec approval")
+                    .accessibilityLabel(item.prompt.kind == "exec"
+                        ? String(localized: "Review exec approval")
+                        : String(localized: "Review approval"))
                     .accessibilityValue(item.prompt.commandPreview ?? item.prompt.commandText)
                 }
             }
@@ -385,6 +387,9 @@ extension SettingsProTab {
                             .font(OpenClawType.body)
                     }
                 } else {
+                    if pendingApproval.kind == "system-agent" {
+                        ApprovalDashboardReviewButton(prompt: pendingApproval)
+                    }
                     if pendingApproval.allowsAllowOnce {
                         Button {
                             Task { await self.appModel.resolvePendingExecApprovalPrompt(decision: "allow-once") }
@@ -476,7 +481,7 @@ extension SettingsProTab {
 
             self.diagnosticChecksCard
 
-            self.detailListCard {
+            Section {
                 SettingsDetailRow("Device", value: .verbatim(DeviceInfoHelper.deviceFamily()))
                 SettingsDetailRow(
                     "Platform",
@@ -580,7 +585,7 @@ extension SettingsProTab {
             }
 
             // Concise public details only; deep hardware identifiers live in Diagnostics.
-            detailListCard {
+            Section {
                 SettingsDetailRow("Device", value: .verbatim(DeviceInfoHelper.deviceFamily()))
                 SettingsDetailRow(
                     "iOS",

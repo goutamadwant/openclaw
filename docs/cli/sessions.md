@@ -35,6 +35,9 @@ names and flags wrap without being truncated, and Unicode keys stay aligned.
 Long keys show their beginning and end; use `openclaw sessions --json` for complete
 session keys.
 
+Token counts below 1,000 appear as whole numbers; larger counts use compact `k`
+or `m` labels. JSON output retains exact numeric counts.
+
 Flags:
 
 | Flag                 | Description                                                         |
@@ -142,6 +145,9 @@ openclaw sessions delete "agent:main:scratch-1" --dry-run
 openclaw sessions delete "agent:main:scratch-1" --yes --json
 ```
 
+Repeated keys are processed once, in first-occurrence order, after surrounding
+whitespace is removed. This also applies to `sessions archive`.
+
 <Warning>
   Delete is destructive. In an interactive terminal it asks once before
   deleting the valid keys. Non-interactive and `--json` deletion requires
@@ -177,8 +183,10 @@ Both lifecycle commands:
 - emit one stable JSON envelope with `ok`, `operation`, `dryRun`, and `results`
   when `--json` is set.
 
-Dry-run uses the Gateway's session list to report protected agent-main sessions
-as failed, even when the CLI uses different local session settings. Already
+Lifecycle commands look up each requested key directly, including cron run sessions
+hidden from the Gateway's general session list. Dry-run uses those Gateway facts to
+report protected agent-main sessions as failed, even when the CLI uses different
+local session settings. Already
 archived sessions remain successful archive no-ops. Dry-run does not execute all
 Gateway lifecycle checks: `global` previews can still show an archive or delete
 action that the Gateway refuses. Explicitly selected non-default global deletion
@@ -243,6 +251,7 @@ openclaw sessions export-trajectory --session-key "agent:main:telegram:direct:12
 This is the command path used by the `/export-trajectory` slash command after
 the owner approves the exec request. The output directory is always resolved
 inside `.openclaw/trajectory-exports/` under the selected workspace.
+The file list in text and JSON output reports only artifacts written to the bundle.
 
 ## Cleanup maintenance
 

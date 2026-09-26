@@ -13,6 +13,10 @@ import {
   resolveStateDatabaseCoordinatorPath,
   withStateDatabaseCoordinatorRuntimeDirectory,
 } from "../infra/state-database-coordinator.js";
+import { setConsoleSubsystemFilter } from "../logging/console.js";
+import { setLoggerOverride } from "../logging/logger.js";
+import { loggingState } from "../logging/state.js";
+import { withEnvAsync } from "../test-utils/env.js";
 import {
   openClawStateDatabaseCache,
   recordOpenClawStateDatabaseOpenFailure,
@@ -120,6 +124,60 @@ describe("unpublished state database acquisition", () => {
       database.walMaintenance.close();
       closeTrackedStateDatabase(database.db);
     }
+  });
+
+  it("records and reports SQLite errors from scheduled shared-state checkpoints", async () => {
+    await withEnvAsync({ OPENCLAW_LOG_LEVEL: undefined }, async () => {
+      const previousLogging = { ...loggingState };
+      const warn = vi.fn<(line: string) => void>();
+      try {
+        setLoggerOverride({ level: "silent", consoleLevel: "warn", consoleStyle: "json" });
+        setConsoleSubsystemFilter(["state/db"]);
+        loggingState.forceConsoleToStderr = false;
+        loggingState.rawConsole = { log: vi.fn(), info: vi.fn(), warn, error: vi.fn() };
+        const { params } = acquisitionFixture();
+        const database = openUnpublishedStateDatabase(params);
+        const prepare = database.db.prepare.bind(database.db);
+        const checkpointFailure = new Error("checkpoint storage unavailable");
+        const intercepted = vi.spyOn(database.db, "prepare").mockImplementation((sql) => {
+          if (sql === "PRAGMA wal_checkpoint(PASSIVE);") {
+            throw checkpointFailure;
+          }
+          return prepare(sql);
+        });
+        try {
+          warn.mockClear();
+          await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+          expect(database.walMaintenance.health).toMatchObject({
+            state: "error",
+            error: "checkpoint storage unavailable",
+            warning: true,
+          });
+          expect(warn.mock.calls.map(([line]) => JSON.parse(line) as unknown)).toContainEqual(
+            expect.objectContaining({
+              level: "warn",
+              subsystem: "state/db",
+              message: "Shared-state WAL maintenance failed",
+              error: "checkpoint storage unavailable",
+              path: params.pathname,
+              checkpoint: database.walMaintenance.health,
+            }),
+          );
+          intercepted.mockRestore();
+          await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+          expect(database.walMaintenance.health).toMatchObject({
+            state: "complete",
+            warning: false,
+          });
+        } finally {
+          intercepted.mockRestore();
+          database.walMaintenance.close();
+          closeTrackedStateDatabase(database.db);
+        }
+      } finally {
+        Object.assign(loggingState, previousLogging);
+      }
+    });
   });
 
   it.each([
@@ -278,7 +336,7 @@ describe("unpublished state database acquisition", () => {
           pathname: path.join(path.dirname(params.pathname), "healthy.sqlite"),
           ensureSchema,
         });
-        openClawStateDatabaseCache.publishOpenClawStateDatabase(healthy);
+        openClawStateDatabaseCache.publishOpenClawStateDatabase(healthy, params.env);
         expect(() => openClawStateDatabaseCache.closeOpenClawStateDatabase()).toThrow(
           maintenanceFails ? AggregateError : nativeFailure,
         );
@@ -357,7 +415,7 @@ describe("unpublished state database acquisition", () => {
       }
       const db = expectDefined(opened.at(-1), "terminal failed acquisition");
       const terminalFailure = expectDefined(
-        openClawStateDatabaseCache.getOpenClawStateDatabaseRuntimeFailure(params.pathname),
+        openClawStateDatabaseCache.getOpenClawStateDatabaseRecordedFailure(params.pathname),
         "latched terminal failure",
       );
       expect(terminalFailure.name).toBe(
@@ -395,7 +453,7 @@ describe("unpublished state database acquisition", () => {
       });
       exclusion.release();
       expect(
-        openClawStateDatabaseCache.getOpenClawStateDatabaseRuntimeFailure(params.pathname),
+        openClawStateDatabaseCache.getOpenClawStateDatabaseRecordedFailure(params.pathname),
       ).toBe(terminalFailure);
     },
   );

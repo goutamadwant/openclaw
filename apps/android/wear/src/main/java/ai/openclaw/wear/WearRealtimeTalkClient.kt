@@ -12,7 +12,6 @@ import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.os.SystemClock
-import com.google.android.gms.tasks.Task
 import com.google.android.gms.wearable.ChannelClient
 import com.google.android.gms.wearable.Wearable
 import kotlinx.coroutines.CancellationException
@@ -27,11 +26,11 @@ import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -40,8 +39,6 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
 import kotlin.math.ceil
 import kotlin.math.sqrt
 
@@ -129,6 +126,8 @@ internal class WearRealtimeTalkClient(
             generation = attemptGeneration.incrementAndGet(),
             resources = checkNotNull(resources),
           )
+        // A completed startup callback is not authority to capture after cancellation.
+        currentCoroutineContext().ensureActive()
         activate(attempt)
         activatedAttempt = attempt
         resources = null
@@ -137,7 +136,9 @@ internal class WearRealtimeTalkClient(
         snapshot
       } catch (err: Throwable) {
         closeChannel(resources)
-        activatedAttempt?.let(::closeLocal)
+        // A failed start owes Voice the same audio error a failed restart publishes.
+        // Cancellation cannot reach here: nothing suspends between activate and return.
+        activatedAttempt?.let { closeLocal(it, failed = true) }
         if (channelOpened) {
           // Finish ambiguous-start cleanup before another attempt can acquire
           // the lifecycle lock and create a replacement relay for this Watch.
@@ -183,15 +184,15 @@ internal class WearRealtimeTalkClient(
         opened =
           channelClient
             .openChannel(nodeId, wearRealtimeAudioChannelPath(attemptId, attemptScopedAudio))
-            .awaitRealtimeTask()
-        input = channelClient.getInputStream(opened).awaitRealtimeTask()
-        output = channelClient.getOutputStream(opened).awaitRealtimeTask()
+            .awaitWearTask()
+        input = channelClient.getInputStream(opened).awaitWearTask()
+        output = channelClient.getOutputStream(opened).awaitWearTask()
         return ChannelResources(opened, input, output)
       } catch (err: Throwable) {
         withContext(NonCancellable) {
           input.closeQuietly()
           output.closeQuietly()
-          opened?.let { channel -> runCatching { channelClient.close(channel).awaitRealtimeTask() } }
+          opened?.let { channel -> runCatching { channelClient.close(channel).awaitWearTask() } }
         }
         if (err is CancellationException) throw err
         lastError = err
@@ -265,9 +266,11 @@ internal class WearRealtimeTalkClient(
             .build(),
         ).setBufferSizeInBytes(maxOf(minimumBuffer * 2, frameBytes * 4))
         .build()
-    check(recorder.state == AudioRecord.STATE_INITIALIZED)
     audioRecord = recorder
+    check(recorder.state == AudioRecord.STATE_INITIALIZED)
     recorder.startRecording()
+    // Native start failure can return normally while the recorder remains stopped.
+    check(recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING)
     _isCapturing.value = true
     captureJob =
       scope.launch {
@@ -462,6 +465,7 @@ internal class WearRealtimeTalkClient(
     audioFocus.abandon()
     if (resumeCapture && attempt != null && isCurrent(attempt)) {
       runCatching { startCaptureLocked(attempt) }
+        .onFailure { handleChannelFailure(attempt) }
     }
   }
 
@@ -540,15 +544,6 @@ internal fun wearRealtimeAudioChannelPath(
     WearProtocol.LEGACY_REALTIME_AUDIO_CHANNEL_PATH
   }
 
-internal fun pcm16LeMouthLevels(
-  pcm: ByteArray,
-  sampleRateHz: Int = WearProtocol.REALTIME_AUDIO_SAMPLE_RATE_HZ,
-  frameMillis: Int = MOUTH_FRAME_MILLIS,
-): List<Float> =
-  Pcm16MouthLevelAccumulator(sampleRateHz, frameMillis).run {
-    append(pcm) + flush()
-  }
-
 internal class Pcm16MouthLevelAccumulator(
   private val sampleRateHz: Int = WearProtocol.REALTIME_AUDIO_SAMPLE_RATE_HZ,
   frameMillis: Int = MOUTH_FRAME_MILLIS,
@@ -609,10 +604,3 @@ private const val RMS_SPEECH_RANGE = 0.2
 private fun java.io.Closeable?.closeQuietly() {
   runCatching { this?.close() }
 }
-
-private suspend fun <T> Task<T>.awaitRealtimeTask(): T =
-  suspendCancellableCoroutine { continuation ->
-    addOnSuccessListener { value -> if (continuation.isActive) continuation.resume(value) }
-    addOnFailureListener { error -> if (continuation.isActive) continuation.resumeWithException(error) }
-    addOnCanceledListener { continuation.cancel() }
-  }

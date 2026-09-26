@@ -15,6 +15,7 @@ import type { CodexAppServerExtensionFactory } from "./codex-app-server-extensio
 import type { PluginCompatCode } from "./compat/registry.js";
 import type { PluginActivationSource } from "./config-activation-shared.js";
 import type { EmbeddingProviderAdapter } from "./embedding-provider-types.js";
+import type { PluginGatewayAccessPolicy } from "./gateway-access-policy.types.js";
 import type {
   PluginAgentEventSubscriptionRegistration,
   PluginControlUiDescriptor,
@@ -59,7 +60,7 @@ import type {
 } from "./registry-contribution-types.js";
 import type { PluginRuntime } from "./runtime/types.js";
 import type { SessionCatalogProvider } from "./session-catalog.js";
-import type { PluginDependencyStatus } from "./status-dependencies-core.js";
+import type { PluginDependencyStatus } from "./status-dependencies.types.js";
 import type { PluginMcpServerConnectionResolverRegistration } from "./types.mcp-connection.js";
 type ChannelPlugin = import("../channels/plugins/types.plugin.js").ChannelPlugin;
 type CliBackendPlugin = import("./types.js").CliBackendPlugin;
@@ -109,8 +110,10 @@ type PluginRegistrationOwner = {
 /** Agent tool factory registered by one plugin runtime. */
 export type PluginToolRegistration = PluginRegistrationOwner & {
   factory: OpenClawPluginToolFactory;
+  /** Explicitly registered required-authority context, never inferred from plugin identity. */
+  contextVersion?: 2;
   names: string[];
-  declaredNames?: string[];
+  declaredNames?: ReadonlySet<string>;
   optional: boolean;
   /** Loader-owned provenance. Missing values are conservative legacy registrations. */
   origin?: PluginOrigin;
@@ -126,6 +129,17 @@ type PluginCliRegistration = PluginRegistrationOwner & {
 export type PluginHttpRouteRegistration = {
   /** Retired ingress awaiting a lifecycle replacement; responds with Retry-After. */
   handoff?: true;
+  /** Compatibility endpoints retained by live holders or route handoffs. */
+  legacyListeners?: readonly {
+    port: number;
+    host?: string;
+    /** Shipped listener-liveness response: exact raw path, status 200, body "ok". */
+    health?: { path: string; contentType?: string };
+    /** Shipped Node HTTP deadlines in milliseconds; omission keeps Node defaults. */
+    timeouts?: { headers: number; request: number; socket: number };
+  }[];
+  /** Endpoints retained only by a handoff, without a live holder. */
+  legacyListenerHandoffs?: PluginHttpRouteRegistration["legacyListeners"];
   pluginId?: string;
   path: string;
   handler: OpenClawPluginHttpRouteHandler;
@@ -147,10 +161,14 @@ type PluginHostedMediaResolverRegistration = PluginRegistrationOwner & {
 
 export type PluginChannelRegistration = PluginRegistrationOwner & {
   plugin: ChannelPlugin;
+  /** Prepared views retain the exact transport donor in addition to their local admission. */
+  borrowedRuntimeRecord?: PluginRecord;
   /** Exact record-bound runtime resolver captured when the active plugin registered the channel. */
   resolveChannelRuntime?: () => PluginRuntime["channel"];
   /** Loader-owned provenance. Missing values are conservative legacy registrations. */
   origin?: PluginOrigin;
+  /** Host-owned capture of the exact verified official channel registration. */
+  captureReadAuthority?: () => (() => boolean) | undefined;
 };
 
 type PluginChannelSetupRegistration = PluginRegistrationOwner & {
@@ -220,12 +238,14 @@ type PluginHookRegistration = {
 };
 
 export type PluginServiceRegistration = PluginRegistrationOwner & {
+  readonly id: string;
   service: OpenClawPluginService;
   origin: PluginOrigin;
   trustedOfficialInstall?: boolean;
 };
 
 export type PluginGatewayDiscoveryServiceRegistration = PluginRegistrationOwner & {
+  readonly id: string;
   service: OpenClawGatewayDiscoveryService;
   instance?: PluginInstanceExecution;
 };
@@ -241,6 +261,10 @@ export type PluginNodeHostCommandRegistration = PluginRegistrationOwner & {
 type PluginNodeInvokePolicyRegistration = PluginRegistrationOwner & {
   policy: import("./types.js").OpenClawPluginNodeInvokePolicy;
   pluginConfig?: Record<string, unknown>;
+};
+
+type PluginGatewayAccessPolicyRegistration = PluginRegistrationOwner & {
+  policy: PluginGatewayAccessPolicy;
 };
 
 export type PluginWidgetPresenterRegistration = PluginRegistrationOwner & {
@@ -378,6 +402,7 @@ export type PluginRecord = {
   contracts?: PluginManifestContracts;
   dashboard?: PluginManifestDashboard;
   controlUi?: PluginManifestControlUi;
+  uiCapabilities?: PluginManifestRecord["uiCapabilities"];
   mcpServers?: Record<string, PluginManifestMcpServer>;
   memorySlotSelected?: boolean;
   dependencyStatus?: PluginDependencyStatus;
@@ -414,6 +439,10 @@ export type PluginRegistry = {
   agentHarnesses: PluginAgentHarnessRegistration[];
   pluginRuntimeArtifacts: Map<string, ResolvedPluginRuntimeArtifact>;
   compactionProviders: RegisteredCompactionProvider[];
+  decisionProviders: Array<{
+    pluginId: string;
+    host: import("../decisions/provider-host.js").DecisionProviderHost;
+  }>;
   detachedTaskRuntimes: DetachedTaskLifecycleRuntimeRegistration[];
   legacyInternalHooks: PluginLegacyInternalHookRegistration[];
   memoryCapabilities: MemoryPluginCapabilityRegistration[];
@@ -436,6 +465,7 @@ export type PluginRegistry = {
   reloads: PluginReloadRegistration[];
   nodeHostCommands: PluginNodeHostCommandRegistration[];
   nodeInvokePolicies: PluginNodeInvokePolicyRegistration[];
+  gatewayAccessPolicies: PluginGatewayAccessPolicyRegistration[];
   securityAuditCollectors: PluginSecurityAuditCollectorRegistration[];
   services: PluginServiceRegistration[];
   gatewayDiscoveryServices: PluginGatewayDiscoveryServiceRegistration[];

@@ -9,16 +9,8 @@ enum DashboardGatewaysRequest: Equatable {
     case setPrimary(DashboardGatewayTarget)
     case reconnect(DashboardGatewayTarget)
     case reconnectCancel(DashboardGatewayTarget)
+    case reconnectBrowser(DashboardGatewayTarget, UUID)
     case openSettings
-}
-
-@MainActor
-final class DashboardGatewaysMessageHandler: NSObject, WKScriptMessageHandler {
-    weak var owner: DashboardWindowController?
-
-    func userContentController(_: WKUserContentController, didReceive message: WKScriptMessage) {
-        self.owner?.receiveGatewaysMessage(message)
-    }
 }
 
 extension DashboardWindowController {
@@ -84,6 +76,11 @@ extension DashboardWindowController {
         else {
             return nil
         }
+        if type == "reconnect-browser" {
+            guard let rawAttempt = payload["attempt"] as? String,
+                  let attempt = UUID(uuidString: rawAttempt) else { return nil }
+            return .reconnectBrowser(target, attempt)
+        }
         return switch type {
         case "select": .select(target)
         case "open-window": .openWindow(target)
@@ -97,17 +94,27 @@ extension DashboardWindowController {
     func receiveGatewaysMessage(_ message: WKScriptMessage) {
         guard message.name == Self.gatewaysMessageHandlerName,
               message.webView === self.webView,
-              message.frameInfo.isMainFrame,
-              let request = Self.gatewaysRequest(from: message.body)
+              message.frameInfo.isMainFrame
         else {
             return
         }
+        if let payload = message.body as? [String: Any],
+           payload["type"] as? String == "connection-state-changed"
+        {
+            guard Self.isTrustedLinkSource(message.frameInfo.request.url, dashboardURL: self.currentURL) else { return }
+            self.refreshGatewayHealth()
+            return
+        }
+        guard let request = Self.gatewaysRequest(from: message.body) else { return }
         let isSignedOutAction = self.signedOut.map { page in
-            request == .reconnect(page.target) || request == .reconnectCancel(page.target)
+            if case let .reconnectBrowser(target, _) = request { return target == page.target }
+            return request == .reconnect(page.target) || request == .reconnectCancel(page.target)
         } ?? false
         let isSignedOutDocument = self.isShowingFailurePage && isSignedOutAction &&
             message.frameInfo.request.url?.absoluteString == "about:blank" &&
             self.webView.url?.absoluteString == "about:blank"
+        // The recovery capability belongs to the native failure document, never a loaded Gateway page.
+        if case .reconnectBrowser = request, !isSignedOutDocument { return }
         guard isSignedOutDocument ||
             Self.isTrustedLinkSource(message.frameInfo.request.url, dashboardURL: self.currentURL) else { return }
         DashboardManager.shared.handleGatewayRequest(request, from: self)
@@ -115,11 +122,7 @@ extension DashboardWindowController {
 
     func updateGatewaySnapshot(_ snapshot: DashboardGatewaySnapshot) {
         self.gatewaySnapshot = snapshot
-        let controller = self.webView.configuration.userContentController
-        controller.removeAllUserScripts()
-        Self.installNativeChromeScript(into: controller, url: self.currentURL)
-        Self.installNativeGatewaysScript(into: controller, url: self.currentURL, snapshot: snapshot)
-        Self.installNativeAuthScript(into: controller, url: self.currentURL, auth: self.auth)
+        self.refreshNativeScripts()
         self.webView.evaluateJavaScript(Self.scopedDashboardScript(
             Self.nativeGatewaysScriptSource(snapshot: snapshot, dispatch: true), url: self.currentURL))
     }
@@ -129,10 +132,15 @@ extension DashboardWindowController {
         url: URL,
         snapshot: DashboardGatewaySnapshot?)
     {
-        guard let snapshot else { return }
+        let snapshotScript = snapshot.map { self.nativeGatewaysScriptSource(snapshot: $0, dispatch: false) } ?? ""
         userContentController.addUserScript(WKUserScript(
             source: self.scopedDashboardScript(
-                self.nativeGatewaysScriptSource(snapshot: snapshot, dispatch: false), url: url),
+                """
+                \(snapshotScript)
+                window.addEventListener('openclaw:native-gateway-health-changed', () => {
+                  window.webkit.messageHandlers.openclawGateways.postMessage({type: 'connection-state-changed'});
+                });
+                """, url: url),
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true))
     }

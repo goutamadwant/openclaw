@@ -4,6 +4,7 @@
 import type { SpawnSyncOptions } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import prettyMilliseconds from "pretty-ms";
+import { resolveNodeRuntimeExecutable } from "../src/infra/node-runtime-executable.ts";
 import {
   finalizeBuildStepCache,
   resolveBuildStepCacheState,
@@ -17,6 +18,8 @@ import {
   withDistArtifactOwnership,
 } from "./lib/dist-artifact-ownership.mts";
 import { runManagedCommand } from "./lib/managed-child-process.mts";
+import type { MemoryLimitParams } from "./lib/process-memory.mts";
+import { preflightInstalledSourceArtifacts } from "./lib/source-update-artifact-preflight.mts";
 import {
   TSDOWN_PACKAGE_CONFIG_GROUP,
   TSDOWN_UNIFIED_CONFIG_GROUP,
@@ -32,10 +35,9 @@ import {
   TSDOWN_DECLARATION_TOOL_INPUTS,
   TSDOWN_PACKAGES_CACHE_INPUT,
   resolveTsdownBuildPlan,
-  type MemoryLimitParams,
 } from "./tsdown-build.mts";
 
-const nodeBin = process.execPath;
+const nodeBin = resolveNodeRuntimeExecutable() ?? process.execPath;
 
 export type BuildAllStep = BuildCacheStep &
   (
@@ -527,6 +529,7 @@ export async function runBuildAllSteps(
     steps?: BuildAllStep[];
   } = {},
 ) {
+  await preflightInstalledSourceArtifacts(params.env ?? process.env);
   const { env: buildEnv, heapShortfall } = resolveBuildAllTsdownPlan(
     profile,
     resolveBuildAllEnvironment(params.env),

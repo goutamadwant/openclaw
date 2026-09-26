@@ -5,15 +5,10 @@ import { iterateGraphemes, visibleWidth } from "./ansi.js";
 import { stylePromptTitle } from "./prompt-style.js";
 
 const MIN_NOTE_COLUMNS = 80;
-const URL_PREFIX_RE = /^(https?:\/\/|file:\/\/)/i;
-const WINDOWS_DRIVE_RE = /^[a-zA-Z]:[\\/]/;
 const FILE_LIKE_RE = /^[a-zA-Z0-9._-]+$/;
 const suppressNotesStorage = new AsyncLocalStorage<boolean>();
 
 function isSuppressedByEnv(value: string | undefined): boolean {
-  if (!value) {
-    return false;
-  }
   const normalized = normalizeLowercaseStringOrEmpty(value);
   if (!normalized) {
     return false;
@@ -22,23 +17,6 @@ function isSuppressedByEnv(value: string | undefined): boolean {
 }
 
 function isCopySensitiveToken(word: string): boolean {
-  if (!word) {
-    return false;
-  }
-  if (URL_PREFIX_RE.test(word)) {
-    return true;
-  }
-  if (
-    word.startsWith("/") ||
-    word.startsWith("~/") ||
-    word.startsWith("./") ||
-    word.startsWith("../")
-  ) {
-    return true;
-  }
-  if (WINDOWS_DRIVE_RE.test(word) || word.startsWith("\\\\")) {
-    return true;
-  }
   if (word.includes("/") || word.includes("\\")) {
     return true;
   }

@@ -5,14 +5,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { withTestDir } from "../test-helpers/temp-dir.js";
 import { captureEnv } from "../test-utils/env.js";
 import { withMockedPlatform } from "../test-utils/vitest-spies.js";
+import type { CommandRunner } from "./update-global-command-runner.js";
 import {
   detectGlobalInstallManagerForRoot,
   globalInstallArgs,
   globalInstallFallbackArgs,
   resolveGlobalInstallTarget,
-  resolveNpmGlobalPrefixLayoutFromPrefix,
-  type CommandRunner,
 } from "./update-global.js";
+import { resolveNpmGlobalPrefixLayoutFromPrefix } from "./update-npm-prefix.js";
 
 vi.mock("node:child_process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:child_process")>()),
@@ -60,12 +60,6 @@ describe("npm global install lifecycle policy", () => {
       "--loglevel=error",
       "--min-release-age=0",
     ]);
-  });
-
-  it("omits npm's lifecycle allowlist before npm 11.16", () => {
-    expect(
-      globalInstallArgs("npm", "openclaw@latest", null, null, null, "unflagged"),
-    ).not.toContain("--allow-scripts=openclaw");
   });
 
   it("allows only the resolved npm candidate lifecycle identity", () => {

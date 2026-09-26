@@ -7,7 +7,7 @@ import { formatErrorMessage } from "../infra/errors.js";
 import type { OpenClawStateDatabaseOptions } from "../state/openclaw-state-db.js";
 import { hashStableJson } from "./installed-plugin-index-hash.js";
 import { resolveInstalledPluginIndexInstallOwner } from "./installed-plugin-index-install-owner.js";
-import { readPersistedInstalledPluginIndexRowSync } from "./installed-plugin-index-row.js";
+import { readPersistedInstalledPluginIndexRowSync } from "./installed-plugin-index-record-state.js";
 import type { InstalledPluginIndexWriteReceipt } from "./installed-plugin-index-store-write.js";
 import { parseInstalledPluginIndex } from "./installed-plugin-index-store.js";
 import { createInstalledPluginOwnershipResolver } from "./installed-plugin-package-ownership.js";
@@ -18,6 +18,7 @@ import {
   withPluginLifecycleLease,
   type PluginLifecycleLeaseContext,
 } from "./plugin-lifecycle-lease.js";
+import { readPluginMetadataStateRow } from "./plugin-metadata-state-worker.js";
 
 export type PluginInstallRuntimeCommit = {
   pluginId: string;
@@ -64,7 +65,7 @@ export class PluginInstallRuntimeBatch {
   private readonly retained = new Set<string>();
   private readonly sourceChecks = new Map<string, () => void>();
   private databasePath?: string;
-  private phase: "collecting" | "prepared" | "applying" | "closed" = "collecting";
+  private phase: "collecting" | "preparing" | "prepared" | "applying" | "closed" = "collecting";
 
   constructor(
     private readonly options: Pick<OpenClawStateDatabaseOptions, "env" | "path" | "database">,
@@ -166,17 +167,22 @@ export class PluginInstallRuntimeBatch {
   }
 
   /** Called before the original batch lease exits, after its compensation has settled. */
-  prepare(lease: PluginLifecycleLeaseContext): void {
+  async prepare(lease: PluginLifecycleLeaseContext): Promise<void> {
     this.assertCollecting();
+    this.phase = "preparing";
+    const databasePath = lease.databasePath;
     lease.assertOwned();
-    this.databasePath = lease.databasePath;
+    this.assertOpen();
+    this.databasePath = databasePath;
     if (!this.hasCommitted && this.retained.size === 0) {
       this.phase = "prepared";
       return;
     }
-    const index = indexFromRow(
-      readPersistedInstalledPluginIndexRowSync({ filePath: lease.databasePath })?.value_json,
-    );
+    // Settlement needs the final persisted row, even if this lease cached an earlier index.
+    const row = await readPluginMetadataStateRow("installed-index", { path: databasePath });
+    lease.assertOwned();
+    this.assertOpen();
+    const index = indexFromRow(row?.value_json);
     const current = index?.installRecords ?? {};
     const targets = new Map<string, PluginInstallBatchTarget>();
     for (const pluginId of this.retained) {
@@ -213,7 +219,7 @@ export class PluginInstallRuntimeBatch {
     }
     for (const commit of finalCommits.values()) {
       const { pluginId, write } = commit;
-      if (write.mutation.databasePath !== lease.databasePath) {
+      if (write.mutation.databasePath !== databasePath) {
         throw new Error("Plugin batch commit belongs to a different state database");
       }
       const installed = indexFromRow(write.mutation.after.value_json)?.installRecords[pluginId];
@@ -233,6 +239,8 @@ export class PluginInstallRuntimeBatch {
       }
       targets.set(pluginId, { pluginId, installHash, sourceDigests: commit.sourceDigests });
     }
+    lease.assertOwned();
+    this.assertOpen();
     this.targets = [...targets.values()].toSorted((a, b) => a.pluginId.localeCompare(b.pluginId));
     this.phase = "prepared";
   }

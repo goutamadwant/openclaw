@@ -1,5 +1,4 @@
-// Memory Core plugin module implements manager embedding ops behavior.
-import fs from "node:fs/promises";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { expectDefined } from "openclaw/plugin-sdk/expect-runtime";
 import {
@@ -12,12 +11,9 @@ import { createSubsystemLogger } from "openclaw/plugin-sdk/memory-core-host-engi
 import {
   buildFileEntry,
   buildMultimodalChunkForIndexing,
-  isFileMissingError,
   MEMORY_EMBEDDING_CACHE_TABLE,
   MEMORY_SEARCH_DEADLINE_CONTROL,
-  retryTransientMemoryRead,
   runWithConcurrency,
-  type MemoryChunk,
   type MemorySearchDeadlineControl,
   type MemorySource,
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
@@ -29,12 +25,15 @@ import {
 } from "openclaw/plugin-sdk/sqlite-runtime";
 import { chunkItems } from "openclaw/plugin-sdk/text-chunking";
 import { hasMemorySessionTombstone } from "../memory-session-tombstones.js";
-import { withMemoryWorkspaceLock } from "../memory-workspace-lock.js";
+import {
+  withMemoryWorkspaceLock,
+  withMemoryWorkspacePreparation,
+} from "../memory-workspace-lock.js";
 import { readSessionResetRecallCutoffMetadata } from "../session-reset-recall-metadata.js";
 import type { EmbeddingProvider } from "./embeddings.js";
 import type { IndexedMemoryChunk } from "./manager-chunk-writer.js";
 import { prepareMemoryIndexInWorker } from "./manager-cpu-worker-runtime.js";
-import { readMemoryDatabaseRevision } from "./manager-db.js";
+import { readMemoryDatabaseRevision } from "./manager-db-kernel.js";
 import {
   clearMemoryEmbeddingCacheIdentities,
   collectMemoryCachedEmbeddings,
@@ -51,10 +50,12 @@ import {
   runMemoryEmbeddingRetryLoop,
 } from "./manager-embedding-policy.js";
 import { resolveChunkProvenance } from "./manager-index-preparation.js";
+import { readMemoryIndexSource } from "./manager-index-source.js";
 import {
   resolveMemoryIndexProviderIdentities,
   type MemoryIndexProviderIdentity,
 } from "./manager-reindex-state.js";
+import type { MemorySourceIndexReplacement } from "./manager-source-index-kernel.js";
 import {
   MemoryManagerSyncOps,
   type MemoryIndexWorkItem,
@@ -129,10 +130,6 @@ function formatBatchSourceCounts(counts: Record<string, number>): string {
       .map(([source, count]) => `${source}=${count}`)
       .join(",") || "none"
   );
-}
-
-function splitSourceWideEmbeddingChunks<T>(chunks: T[], maxRequests: number): T[][] {
-  return chunkItems(chunks, Math.max(1, Math.floor(maxRequests)));
 }
 
 function resolveEmbeddingTimeoutMs(params: {
@@ -331,26 +328,16 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
       "primary memory provider identity",
     ).providerKey;
     const database = this.database;
+    const generation = {
+      database,
+      databaseRevision: readMemoryDatabaseRevision(database.db),
+      cacheWritesInvalidated: false,
+      providerKey,
+      identities,
+    };
     this.syncProviderGeneration = provider
-      ? {
-          kind: "semantic",
-          database,
-          databaseRevision: readMemoryDatabaseRevision(database.db),
-          cacheWritesInvalidated: false,
-          provider,
-          ...(runtime ? { runtime } : {}),
-          providerKey,
-          identities,
-        }
-      : {
-          kind: "fts-only",
-          database,
-          databaseRevision: readMemoryDatabaseRevision(database.db),
-          cacheWritesInvalidated: false,
-          provider: null,
-          providerKey,
-          identities,
-        };
+      ? { ...generation, kind: "semantic", provider, ...(runtime ? { runtime } : {}) }
+      : { ...generation, kind: "fts-only", provider: null };
     this.syncProviderGenerationRelease = provider ? this.acquireProviderUse(provider) : null;
     this.syncProviderGenerationOwners = 1;
   }
@@ -379,16 +366,19 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
        )`,
     );
     while (excess() > 0) {
-      await runSqliteImmediateTransaction(this.db, async () => () => {
-        // Purges can reduce the cache while admission waits; retain the newest cap.
-        const currentExcess = excess();
-        if (currentExcess > 0) {
-          remove.run(Math.min(currentExcess, EMBEDDING_CACHE_PRUNE_BATCH_SIZE));
-        }
-      });
-      await new Promise<void>((resolve) => {
-        setImmediate(resolve);
-      });
+      await runSqliteImmediateTransaction(
+        this.db,
+        async () => () => {
+          // Purges can reduce the cache while admission waits; retain the newest cap.
+          const currentExcess = excess();
+          if (currentExcess > 0) {
+            remove.run(Math.min(currentExcess, EMBEDDING_CACHE_PRUNE_BATCH_SIZE));
+          }
+        },
+        undefined,
+        (write) => this.withDatabaseWrite(write),
+      );
+      await yieldToEventLoop();
     }
   }
 
@@ -450,20 +440,6 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
     });
   }
 
-  private buildBatchDebug(
-    source: string,
-    chunks: MemoryChunk[],
-    context: Record<string, unknown> = {},
-  ) {
-    return (message: string, data?: Record<string, unknown>) =>
-      log.debug(
-        message,
-        data
-          ? { ...data, source, chunks: chunks.length, ...context }
-          : { source, chunks: chunks.length, ...context },
-      );
-  }
-
   private async embedChunksWithBatch(
     candidates: MemoryEmbeddingCacheCandidate[],
     source: string,
@@ -498,7 +474,8 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
           concurrency: this.batch.concurrency,
           pollIntervalMs: this.batch.pollIntervalMs,
           timeoutMs: this.batch.timeoutMs,
-          debug: this.buildBatchDebug(source, chunks, debugContext),
+          debug: (message, data) =>
+            log.debug(message, { ...data, source, chunks: chunks.length, ...debugContext }),
         }),
       fallback: async () => await this.embedChunksInBatches(missingCandidates, generation),
     });
@@ -639,6 +616,40 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
     }
   }
 
+  private async withGeneratedEmbeddingCacheWrite(
+    generation: MemorySemanticProviderGeneration,
+    write: () => void,
+  ): Promise<void> {
+    await this.withPublishedDatabase(async () => {
+      if (
+        this.syncProviderGeneration !== generation ||
+        generation.cacheWritesInvalidated ||
+        generation.database.closed ||
+        this.database !== generation.database
+      ) {
+        return;
+      }
+      // Rebuilds use a shadow index, but generated results belong to the exact
+      // published owner captured by the generation, including after admission.
+      await this.withDatabaseWrite(() =>
+        runSqliteImmediateTransactionSync(generation.database.db, () => {
+          if (
+            this.syncProviderGeneration !== generation ||
+            generation.cacheWritesInvalidated ||
+            generation.database.closed
+          ) {
+            return;
+          }
+          if (readMemoryDatabaseRevision(generation.database.db) !== generation.databaseRevision) {
+            generation.cacheWritesInvalidated = true;
+            return;
+          }
+          write();
+        }),
+      );
+    });
+  }
+
   private async persistGeneratedEmbeddings(
     candidates: MemoryEmbeddingCacheCandidate[],
     embeddings: number[][],
@@ -670,23 +681,12 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
       ) {
         // Separate successful batches can disagree. Neither dimension is authoritative;
         // discard this identity's ambiguous cache so retries can recover after restart.
-        await withMemoryWorkspaceLock(this.workspaceDir, async () => {
-          if (
-            this.syncProviderGeneration !== generation ||
-            generation.cacheWritesInvalidated ||
-            generation.database.closed
-          ) {
-            return;
-          }
-          runSqliteImmediateTransactionSync(generation.database.db, () => {
-            if (
-              readMemoryDatabaseRevision(generation.database.db) === generation.databaseRevision
-            ) {
-              clearMemoryEmbeddingCacheIdentities(generation.database.db, generation.identities);
-            }
+        await withMemoryWorkspaceLock(this.workspaceDir, () =>
+          this.withGeneratedEmbeddingCacheWrite(generation, () => {
+            clearMemoryEmbeddingCacheIdentities(generation.database.db, generation.identities);
             generation.cacheWritesInvalidated = true;
-          });
-        });
+          }),
+        );
       }
       throw new Error(
         "memory embeddings: malformed vector response (count, dimensions, or coordinates)",
@@ -707,7 +707,7 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
         let valid = entryValidity.get(candidate.entry);
         if (valid === undefined) {
           if (candidate.source === "memory") {
-            const current = await buildFileEntry(
+            const current = await (this.memoryFiles?.inspectFile ?? buildFileEntry)(
               candidate.entry.absPath,
               this.workspaceDir,
               this.settings.multimodal,
@@ -732,18 +732,7 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
       if (accepted.length === 0) {
         return;
       }
-      runSqliteImmediateTransactionSync(generation.database.db, () => {
-        if (
-          this.syncProviderGeneration !== generation ||
-          generation.cacheWritesInvalidated ||
-          generation.database.closed
-        ) {
-          return;
-        }
-        if (readMemoryDatabaseRevision(generation.database.db) !== generation.databaseRevision) {
-          generation.cacheWritesInvalidated = true;
-          return;
-        }
+      await this.withGeneratedEmbeddingCacheWrite(generation, () => {
         upsertMemoryEmbeddingCache({
           db: generation.database.db,
           enabled: true,
@@ -916,11 +905,56 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
     vectorReady: boolean,
   ): Promise<void> {
     await withMemoryWorkspaceLock(this.workspaceDir, async () => {
-      const published = await runSqliteImmediateTransaction(this.db, async () => {
+      const database = this.database;
+      const assertCurrent = () => {
+        this.memoryFiles?.assertCurrent();
+        if (
+          this.closed ||
+          database.closed ||
+          !database.db.isOpen ||
+          this.database !== database ||
+          (generation &&
+            (generation.database !== this.publishedDatabase ||
+              generation.database.closed ||
+              !generation.database.db.isOpen ||
+              this.syncProviderGeneration !== generation))
+        ) {
+          throw new Error("Memory source owner changed before replacement");
+        }
+        // The workspace lock remains held through the Worker reply. Forget's
+        // tombstone writer uses this same lock and bumps the publication revision.
+        if (
+          source === "sessions" &&
+          hasMemorySessionTombstone(
+            (generation?.database ?? database).db,
+            this.agentId,
+            expectDefined(entry.sessionId, "memory index session identity"),
+          )
+        ) {
+          this.markFailedFullReindexRetry({ memory: false, sessions: true });
+          throw new Error(
+            "A session was forgotten while memory indexing was running; retry the memory index.",
+          );
+        }
+      };
+      const createReplacement = (): MemorySourceIndexReplacement => ({
+        entry: { path: entry.path, hash: entry.hash, mtimeMs: entry.mtimeMs, size: entry.size },
+        chunks,
+        embeddings,
+        model: generation?.provider?.model ?? "fts-only",
+        now: Date.now(),
+        vectorReady,
+        ...(source === "sessions"
+          ? {
+              source,
+              agentId: this.agentId,
+              sessionId: expectDefined(entry.sessionId, "memory index session identity"),
+            }
+          : { source }),
+      });
+      const prepare = async (): Promise<boolean> => {
         if (source === "memory") {
-          // The lock excludes purge and promotion writers while the exact file
-          // snapshot is validated and its derived index records are committed.
-          const current = await buildFileEntry(
+          const current = await (this.memoryFiles?.inspectFile ?? buildFileEntry)(
             entry.absPath,
             this.workspaceDir,
             this.settings.multimodal,
@@ -930,44 +964,23 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
             log.debug("memory source changed while indexing; queued incremental retry", {
               path: entry.path,
             });
-            return undefined;
+            return false;
           }
         }
-        const now = Date.now();
-        const model = generation?.provider?.model ?? "fts-only";
-        return () => {
-          const result = this.database.sourceIndex.replace(
-            {
-              entry,
-              chunks,
-              embeddings,
-              model,
-              now,
-              vectorReady,
-              ...(source === "sessions"
-                ? {
-                    source,
-                    agentId: this.agentId,
-                    sessionId: expectDefined(entry.sessionId, "memory index session identity"),
-                  }
-                : { source }),
-            },
-            (generation?.database ?? this.database).sourceIndex,
-          );
-          if (result === "forgotten") {
-            this.markFailedFullReindexRetry({ memory: false, sessions: true });
-            throw new Error(
-              "A session was forgotten while memory indexing was running; retry the memory index.",
-            );
-          }
-          return true;
-        };
-      });
+        assertCurrent();
+        return true;
+      };
+      const published = await database.replaceSource(createReplacement(), assertCurrent, prepare);
       if (!published) {
         return;
       }
-      if (generation && this.db === generation.database.db) {
-        generation.databaseRevision = readMemoryDatabaseRevision(generation.database.db);
+      if (generation && database === generation.database) {
+        if (published.beforeRevision !== generation.databaseRevision) {
+          generation.cacheWritesInvalidated = true;
+        }
+        // Admission can resume another writer before this continuation runs.
+        // Adopt only the revision captured by our committed publication.
+        generation.databaseRevision = published.databaseRevision;
       }
       this.database.vectorDegradedWriteWarningShown = logMemoryVectorDegradedWrite({
         vectorEnabled: this.vector.enabled,
@@ -985,19 +998,27 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
     options: { source: MemorySource; content?: string },
     generation: MemorySyncProviderGeneration | null,
   ): Promise<PreparedMemoryIndexEntry | null> {
-    return await withMemoryWorkspaceLock(this.workspaceDir, async () => {
-      const pathClassification = await resolveMemoryPathClassification({
-        absolutePath: entry.absPath,
-        source: options.source,
-        workspaceDir: this.workspaceDir,
-      });
-      if ("kind" in entry && entry.kind === "multimodal") {
-        const multimodalChunk = await buildMultimodalChunkForIndexing(entry);
+    const source = options.source;
+    const kind = entry.kind;
+    const suppliedContent = options.content ?? entry.content;
+    const prepare = async (): Promise<PreparedMemoryIndexEntry | null> => {
+      if (kind === "multimodal") {
+        const multimodalChunk: Awaited<
+          ReturnType<NonNullable<typeof this.memoryFiles>["buildMultimodalChunk"]>
+        > = await (this.memoryFiles?.buildMultimodalChunk ?? buildMultimodalChunkForIndexing)(
+          entry,
+        );
         if (!multimodalChunk) {
           this.dirty = true;
-          await this.deleteIndexedFile(entry.path, options.source);
+          await this.deleteIndexedFile(entry.path, source);
           return null;
         }
+        const pathClassification = await resolveMemoryPathClassification({
+          absolutePath: entry.absPath,
+          source,
+          workspaceDir: this.workspaceDir,
+          readSource: this.memoryFiles ? multimodalChunk : undefined,
+        });
         const chunk: IndexedMemoryChunk = {
           ...multimodalChunk.chunk,
           importance: null,
@@ -1006,31 +1027,26 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
         };
         chunk.provenance = resolveChunkProvenance(
           entry,
-          options.source,
+          source,
           chunk,
           pathClassification.originClass,
         );
         return {
           entry,
-          source: options.source,
+          source,
           chunks: [chunk],
           structuredInputBytes: multimodalChunk.structuredInputBytes,
         };
       }
 
-      const content =
-        options.content ??
-        entry.content ??
-        (await retryTransientMemoryRead(
-          () => fs.readFile(entry.absPath, "utf-8"),
-          `read memory markdown for indexing ${entry.absPath}`,
-        ).catch((err: unknown) => {
-          if (options.source !== "memory" || !isFileMissingError(err)) {
-            throw err;
-          }
-          return null;
-        }));
-      if (content === null) {
+      const read = await readMemoryIndexSource({
+        absolutePath: entry.absPath,
+        workspaceDir: this.workspaceDir,
+        source,
+        suppliedContent,
+        memoryFiles: this.memoryFiles,
+      });
+      if (!read) {
         this.dirty = true;
         return null;
       }
@@ -1042,9 +1058,9 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
           lineMap: entry.lineMap,
           lineProvenance: entry.lineProvenance,
         },
-        source: options.source,
-        content,
-        pathClassification,
+        source,
+        content: read.content,
+        pathClassification: read.pathClassification,
         chunking: this.settings.chunking,
         cutoffLine: cutoff.state === "valid" ? cutoff.cutoffLine : undefined,
         provider:
@@ -1056,10 +1072,13 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
       return {
         entry:
           prepared.contentHash !== undefined ? { ...entry, hash: prepared.contentHash } : entry,
-        source: options.source,
+        source,
         chunks: prepared.chunks,
       };
-    });
+    };
+    return source === "sessions" && kind !== "multimodal" && typeof suppliedContent === "string"
+      ? withMemoryWorkspacePreparation(this.workspaceDir, prepare)
+      : withMemoryWorkspaceLock(this.workspaceDir, prepare);
   }
 
   protected override async indexFiles(items: MemoryIndexWorkItem[]): Promise<void> {
@@ -1119,22 +1138,19 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
       const candidates = current.flatMap((item) =>
         item.chunks.map((chunk) => ({ chunk, entry: item.entry, source: item.source })),
       );
-      const chunks = candidates.map((candidate) => candidate.chunk);
+      const chunkCount = candidates.length;
       const sourceCounts = countBatchSources(current);
       const source = formatBatchSourceLabel(sourceCounts);
       sourceWideBatchGroup += 1;
-      const chunkBatches = splitSourceWideEmbeddingChunks(
-        candidates,
-        SOURCE_WIDE_BATCH_MAX_REQUESTS,
-      );
+      const chunkBatches = chunkItems(candidates, SOURCE_WIDE_BATCH_MAX_REQUESTS);
       log.debug(
-        `memory embeddings: source-wide batch submit group=${sourceWideBatchGroup} source=${source} files=${current.length} chunks=${chunks.length} requests=${chunkBatches.length} sources=${formatBatchSourceCounts(
+        `memory embeddings: source-wide batch submit group=${sourceWideBatchGroup} source=${source} files=${current.length} chunks=${chunkCount} requests=${chunkBatches.length} sources=${formatBatchSourceCounts(
           sourceCounts,
         )} reason=${reason}`,
         {
           source,
           files: current.length,
-          chunks: chunks.length,
+          chunks: chunkCount,
           requests: chunkBatches.length,
           sources: sourceCounts,
           group: sourceWideBatchGroup,
@@ -1156,13 +1172,18 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
           })),
         );
       }
+      candidates.length = 0;
+      chunkBatches.length = 0;
       const sample = embeddings.find((embedding) => embedding.length > 0);
       const vectorReady = sample ? await this.ensureVectorReady(sample.length) : false;
       let offset = 0;
       for (const item of current) {
         const fileEmbeddings = embeddings.slice(offset, offset + item.chunks.length);
-        offset += item.chunks.length;
         await this.writeChunks(item, generation, fileEmbeddings, vectorReady);
+        // Publication has settled; later files must not retain completed vectors.
+        // oxlint-disable-next-line unicorn/no-array-fill-with-reference-type -- Completed slots are never read or mutated.
+        embeddings.fill([], offset, offset + item.chunks.length);
+        offset += item.chunks.length;
       }
       prepared = [];
       preparedRequestCount = 0;
@@ -1233,24 +1254,14 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
 
     let embeddings: number[][];
     try {
+      const candidates = prepared.chunks.map((chunk) => ({
+        chunk,
+        entry: prepared.entry,
+        source: prepared.source,
+      }));
       embeddings = this.batch.enabled
-        ? await this.embedChunksWithBatch(
-            prepared.chunks.map((chunk) => ({
-              chunk,
-              entry: prepared.entry,
-              source: prepared.source,
-            })),
-            options.source,
-            generation,
-          )
-        : await this.embedChunksInBatches(
-            prepared.chunks.map((chunk) => ({
-              chunk,
-              entry: prepared.entry,
-              source: prepared.source,
-            })),
-            generation,
-          );
+        ? await this.embedChunksWithBatch(candidates, options.source, generation)
+        : await this.embedChunksInBatches(candidates, generation);
     } catch (err) {
       const message = formatErrorMessage(err);
       if (

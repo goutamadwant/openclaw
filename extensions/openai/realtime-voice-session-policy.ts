@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
 import type { PluginCapabilityCatalogContext } from "openclaw/plugin-sdk/plugin-entry";
 import type {
-  OpenAICompatibleRealtimeAudioFormat,
   RealtimeVoiceAudioFormat,
   RealtimeVoiceBrowserSessionCreateRequest,
   RealtimeVoiceBridgeCreateRequest,
@@ -180,57 +179,8 @@ export type RealtimeEvent = {
   error?: unknown;
 };
 
-export type RealtimeTurnDetectionConfig = {
-  type: "server_vad";
-  threshold: number;
-  prefix_padding_ms: number;
-  silence_duration_ms: number;
-  create_response: boolean;
-  interrupt_response?: boolean;
-};
-
-type RealtimeGaSessionPolicy = {
-  type: "realtime";
-  model: string;
-  instructions?: string;
-  output_modalities: string[];
-  audio: {
-    input: {
-      format: OpenAICompatibleRealtimeAudioFormat;
-      turn_detection: RealtimeTurnDetectionConfig;
-      noise_reduction: { type: "near_field" } | null;
-      transcription: { model: string; language?: string };
-    };
-    output: {
-      format: OpenAICompatibleRealtimeAudioFormat;
-      voice: OpenAIRealtimeVoice;
-    };
-  };
-  reasoning?: { effort: string };
-  tools?: RealtimeVoiceTool[];
-  tool_choice?: string;
-};
-
-export type RealtimeGaSessionUpdate = {
-  type: "session.update";
-  session: RealtimeGaSessionPolicy;
-};
-
-export type RealtimeAzureDeploymentSessionUpdate = {
-  type: "session.update";
-  session: {
-    modalities: string[];
-    instructions?: string;
-    voice: OpenAIRealtimeVoice;
-    input_audio_format: "g711_ulaw" | "pcm16";
-    output_audio_format: "g711_ulaw" | "pcm16";
-    input_audio_transcription?: { model: string; language?: string };
-    turn_detection: RealtimeTurnDetectionConfig;
-    temperature: number;
-    tools?: RealtimeVoiceTool[];
-    tool_choice?: string;
-  };
-};
+export type RealtimeTurnDetectionConfig = ReturnType<typeof buildOpenAIRealtimeTurnDetectionConfig>;
+type RealtimeGaSessionPolicy = ReturnType<typeof buildOpenAIRealtimeGaSessionPolicy>;
 
 export function normalizeProviderConfig(
   config: RealtimeVoiceProviderConfig,
@@ -245,7 +195,7 @@ export function normalizeProviderConfig(
     // Session creation selects the effective model; an earlier family fallback loses overrides.
     voice: normalizeOptionalString(raw?.speakerVoice ?? raw?.voice)?.toLowerCase(),
     temperature: asFiniteNumber(raw?.temperature),
-    vadThreshold: asUnitInterval(raw?.vadThreshold),
+    vadThreshold: asFiniteNumberInRange(raw?.vadThreshold, { min: 0, max: 1 }),
     silenceDurationMs: asSafeIntegerInRange(raw?.silenceDurationMs, { min: 0 }),
     prefixPaddingMs: asSafeIntegerInRange(raw?.prefixPaddingMs, { min: 0 }),
     interruptResponseOnInputAudio:
@@ -258,10 +208,6 @@ export function normalizeProviderConfig(
     azureDeployment: normalizeOptionalString(raw?.azureDeployment),
     azureApiVersion: normalizeOptionalString(raw?.azureApiVersion),
   };
-}
-
-function asUnitInterval(value: unknown): number | undefined {
-  return asFiniteNumberInRange(value, { min: 0, max: 1 });
 }
 
 type OpenAIRealtimeApiKeyResolution =
@@ -348,12 +294,7 @@ export function resolveOpenAIRealtimeSecretInput(
 }
 
 export function resolveOpenAIRealtimeEnvApiKey(): OpenAIRealtimeApiKeyResolution {
-  const envValue = normalizeSecretInputString(process.env.OPENAI_API_KEY);
-  if (!envValue) {
-    return { status: "missing" };
-  }
-  const value = resolveKeychainSecretRef(envValue);
-  return value ? { status: "available", value } : { status: "missing" };
+  return resolveOpenAIRealtimeSecretInput(process.env.OPENAI_API_KEY);
 }
 
 function resolveOpenAIRealtimeApiKey(
@@ -436,10 +377,10 @@ export function buildOpenAIRealtimeTurnDetectionConfig(params: {
   prefixPaddingMs?: number;
   silenceDurationMs?: number;
   vadThreshold?: number;
-}): RealtimeTurnDetectionConfig {
+}) {
   const configuredAutoResponse = params.autoRespondToAudio ?? true;
   return {
-    type: "server_vad",
+    type: "server_vad" as const,
     threshold: params.vadThreshold ?? 0.5,
     prefix_padding_ms: params.prefixPaddingMs ?? 300,
     silence_duration_ms: params.silenceDurationMs ?? 500,
@@ -466,12 +407,12 @@ export function buildOpenAIRealtimeGaSessionPolicy(params: {
   tools?: RealtimeVoiceTool[];
   vadThreshold?: number;
   voice: OpenAIRealtimeVoice;
-}): RealtimeGaSessionPolicy {
+}) {
   const format = toOpenAICompatibleRealtimeAudioFormat(
     params.audioFormat ?? REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ,
   );
   return {
-    type: "realtime",
+    type: "realtime" as const,
     model: params.model,
     ...(params.instructions !== undefined ? { instructions: params.instructions } : {}),
     output_modalities: ["audio"],
@@ -531,11 +472,7 @@ export async function resolveOpenAIRealtimePlatformAuth(
   if (profileApiKey) {
     return { status: "available", value: profileApiKey };
   }
-  const envApiKey = resolveOpenAIRealtimeEnvApiKey();
-  if (envApiKey.status === "available") {
-    return envApiKey;
-  }
-  return { status: "missing" };
+  return resolveOpenAIRealtimeEnvApiKey();
 }
 
 export async function requireOpenAIRealtimePlatformAuth(
@@ -580,16 +517,7 @@ export async function resolveOpenAIQuicksilverBridgeAuth(
   if (platformAuth.status === "available") {
     return { type: "api-key" as const, token: platformAuth.value };
   }
-  if (
-    hasOpenAIRealtimePlatformAuthInput(
-      {
-        configuredApiKey: params.configuredApiKey,
-        cfg: params.cfg,
-        agentId: params.agentId,
-      },
-      runtime,
-    )
-  ) {
+  if (hasOpenAIRealtimePlatformAuthInput(params, runtime)) {
     throw new Error(
       isOpenAIGptLiveSubscriptionModel(params.model)
         ? OPENAI_GPT_LIVE_PUBLIC_AUTHORED_PLATFORM_AUTH_UNAVAILABLE

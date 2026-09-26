@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { emitAgentEvent, resetAgentEventsForTest } from "../../infra/agent-events.js";
 import type { SubsystemLogger } from "../../logging/subsystem.js";
 import { resetTaskRegistryForTests } from "../../tasks/task-runtime.test-helpers.js";
+import { createTestGatewayScheduler } from "../../test-utils/gateway-scheduler-clock.js";
 import { installInMemoryTaskRegistryRuntime } from "../../test-utils/task-registry-runtime.js";
 import { registerChatAbortController } from "../chat-abort.js";
 import {
@@ -22,7 +23,11 @@ vi.mock("../../audit/audit-config.js", () => ({
   resolveAuditMessageMode: () => "off",
 }));
 vi.mock("../../audit/audit-recorder.js", () => ({
-  createAuditEventRecorder: () => ({ stop: vi.fn(async () => {}) }),
+  createAuditEventRecorder: () => ({
+    record: vi.fn(),
+    recordTool: vi.fn(),
+    stop: vi.fn(async () => {}),
+  }),
 }));
 vi.mock("../server-chat.js", () => ({
   createAgentEventHandler: (...args: unknown[]) => agentEventHandlerMocks.create(...args),
@@ -47,9 +52,12 @@ const mockLog: SubsystemLogger = {
 function createParams(): SubscriptionParams {
   const chatRunState = createChatRunState();
   return {
+    scheduler: createTestGatewayScheduler(),
+    signal: new AbortController().signal,
     log: mockLog,
     broadcast: vi.fn(),
     broadcastToConnIds: vi.fn(),
+    nodeHasSessionSubscribers: () => false,
     nodeSendToSession: vi.fn(),
     agentRunSeq: new Map(),
     chatRunState,
@@ -59,6 +67,7 @@ function createParams(): SubscriptionParams {
     chatAbortControllers: new Map(),
     restartRecoveryCandidates: new Map(),
     terminalSessions: { closeTaskSessions: vi.fn() },
+    refreshConnectedUserProfiles: vi.fn(),
   };
 }
 describe("bound ACP terminal lifecycle", () => {
