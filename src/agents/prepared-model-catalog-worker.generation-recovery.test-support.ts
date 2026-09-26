@@ -4,6 +4,7 @@ import path from "node:path";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { Worker } from "node:worker_threads";
 import { expect, vi } from "vitest";
+import { withTestTimeout } from "../../test/helpers/promise.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { loadGatewayModelCatalogSnapshot } from "../gateway/server-model-catalog.js";
 import { createDeferredCore } from "../shared/deferred.js";
@@ -17,6 +18,7 @@ import {
   type PreparedModelRuntimeInput,
   type PreparedModelRuntimeSnapshot,
 } from "./prepared-model-runtime.js";
+import { registerPreparedModelRuntimePublicationListener } from "./prepared-model-runtime.publication-events.js";
 
 type GenerationRecoveryFixture = {
   root: string;
@@ -108,6 +110,15 @@ export async function expectPublishedOwnerRecoveryAfterGenerationMismatch(
 
   const workerStopped = createDeferredCore();
   const releasePoolRecovery = createDeferredCore();
+  const recoveredMainPublished = createDeferredCore();
+  const unsubscribePublication = registerPreparedModelRuntimePublicationListener((event) => {
+    if (
+      event.phase === "published" &&
+      getPreparedModelRuntimeSnapshot(inputs[0]!) !== published[0]
+    ) {
+      recoveredMainPublished.resolve();
+    }
+  });
   let restoreTermination: (() => void) | undefined;
   const workerChannel = channel("worker_threads");
   const holdSharedPoolRecovery = (message: unknown) => {
@@ -179,11 +190,14 @@ export async function expectPublishedOwnerRecoveryAfterGenerationMismatch(
       // rebind it to the replacement pool.
       await expect(healthyWaiter).resolves.toBeDefined();
     }
-    await vi.waitFor(() => {
-      const recoveredMain = getPreparedModelRuntimeSnapshot(inputs[0]!);
-      expect(recoveredMain).toBeDefined();
-      expect(recoveredMain).not.toBe(published[0]);
-    });
+    await withTestTimeout(
+      recoveredMainPublished.promise,
+      30_000,
+      "Recovered main runtime did not publish",
+    );
+    const recoveredMain = getPreparedModelRuntimeSnapshot(inputs[0]!);
+    expect(recoveredMain).toBeDefined();
+    expect(recoveredMain).not.toBe(published[0]);
     await expect(
       loadPublishedGatewayReplyDispatchRuntime({ agentId: "main" }),
     ).resolves.toBeUndefined();
@@ -202,5 +216,6 @@ export async function expectPublishedOwnerRecoveryAfterGenerationMismatch(
     await Promise.allSettled([failedOwner, failedAuthOwner, healthyWaiter]);
     restoreTermination?.();
     workerChannel.unsubscribe(holdSharedPoolRecovery);
+    unsubscribePublication();
   }
 }
