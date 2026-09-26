@@ -153,11 +153,16 @@ describe("prepared model runtime catalog recovery", () => {
       throw new Error("default prepared model runtime owner was not published");
     }
 
+    let signalAuthBuildStarted: (() => void) | undefined;
+    const authBuildStarted = new Promise<void>((resolve) => {
+      signalAuthBuildStarted = resolve;
+    });
     let releaseAuthBuild: (() => void) | undefined;
     const authBuildBlocked = new Promise<void>((resolve) => {
       releaseAuthBuild = resolve;
     });
     mocks.ensureOpenClawModelsJson.mockImplementationOnce(async (...args: unknown[]) => {
+      signalAuthBuildStarted?.();
       await authBuildBlocked;
       return { agentDir: String(args[1]), wrote: false };
     });
@@ -165,7 +170,7 @@ describe("prepared model runtime catalog recovery", () => {
       agentDir: "/tmp/configured-secondary",
       affectsInheritedStores: false,
     });
-    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(3));
+    await authBuildStarted;
 
     const recovery =
       replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch(initialDefault);
@@ -234,11 +239,16 @@ describe("prepared model runtime catalog recovery", () => {
       throw new Error("secondary prepared model runtime owner was not published");
     }
 
+    let signalAuthBuildStarted: (() => void) | undefined;
+    const authBuildStarted = new Promise<void>((resolve) => {
+      signalAuthBuildStarted = resolve;
+    });
     let releaseAuthBuild: (() => void) | undefined;
     const authBuildBlocked = new Promise<void>((resolve) => {
       releaseAuthBuild = resolve;
     });
     mocks.ensureOpenClawModelsJson.mockImplementationOnce(async (...args: unknown[]) => {
+      signalAuthBuildStarted?.();
       await authBuildBlocked;
       return { agentDir: String(args[1]), wrote: false };
     });
@@ -246,7 +256,7 @@ describe("prepared model runtime catalog recovery", () => {
       agentDir: "/tmp/unused-agent",
       affectsInheritedStores: false,
     });
-    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(2));
+    await authBuildStarted;
 
     const recovery =
       replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch(initialSecondary);
@@ -258,13 +268,9 @@ describe("prepared model runtime catalog recovery", () => {
     releaseAuthBuild?.();
 
     await expect(recovery).resolves.toBe(true);
-    const dispatchResult = await Promise.race([
+    await expect(
       loadPublishedGatewayReplyDispatchRuntime({ agentId: "secondary" }),
-      new Promise<"pending">((resolve) => {
-        setTimeout(() => resolve("pending"), 100);
-      }),
-    ]);
-    expect(dispatchResult).toMatchObject({ agentId: "secondary" });
+    ).resolves.toMatchObject({ agentId: "secondary" });
   });
 
   it("preserves unfinished auth components when recovery adopts a running drain", async () => {
@@ -341,12 +347,18 @@ describe("prepared model runtime catalog recovery", () => {
       throw new Error("default prepared model runtime owner was not published");
     }
 
+    let signalWarning: (() => void) | undefined;
+    const warningReported = new Promise<void>((resolve) => {
+      signalWarning = resolve;
+    });
+    mocks.warn.mockImplementationOnce(() => signalWarning?.());
     mocks.ensureOpenClawModelsJson.mockRejectedValueOnce(new Error("secondary auth failed"));
     mocks.mutationListener?.({
       agentDir: "/tmp/configured-secondary",
       affectsInheritedStores: false,
     });
-    await vi.waitFor(() => expect(mocks.warn).toHaveBeenCalledOnce());
+    await warningReported;
+    expect(mocks.warn).toHaveBeenCalledOnce();
 
     await expect(
       replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch(initialDefault),
@@ -684,20 +696,39 @@ describe("prepared model runtime catalog recovery", () => {
       await secondaryBuildBlocked;
       return { agentDir: "/tmp/configured-secondary", wrote: false };
     });
-
-    const degradedRefresh = refreshPreparedModelRuntimeSnapshots(config, {
-      agentIds: new Set(["secondary"]),
-      catalogMode: "static",
-      gatewayLifecycle: true,
-      startup: true,
+    let signalSecondaryPublished: (() => void) | undefined;
+    const secondaryPublished = new Promise<void>((resolve) => {
+      signalSecondaryPublished = resolve;
     });
-    await expect(degradedRefresh).resolves.toBeUndefined();
-    await expect(
-      replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch(initialDefault),
-    ).resolves.toBe(false);
+    const unsubscribe = registerPreparedModelRuntimePublicationListener((event) => {
+      if (
+        event.phase === "published" &&
+        getPreparedModelRuntimeSnapshot({
+          agentId: "secondary",
+          config,
+          agentDir: "/tmp/configured-secondary",
+          inheritedAuthDir: "/tmp/unused-agent",
+          workspaceDir: "/tmp/workspace-secondary",
+        })
+      ) {
+        signalSecondaryPublished?.();
+      }
+    });
 
-    releaseSecondaryBuild?.();
-    await vi.waitFor(() =>
+    try {
+      const degradedRefresh = refreshPreparedModelRuntimeSnapshots(config, {
+        agentIds: new Set(["secondary"]),
+        catalogMode: "static",
+        gatewayLifecycle: true,
+        startup: true,
+      });
+      await expect(degradedRefresh).resolves.toBeUndefined();
+      await expect(
+        replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch(initialDefault),
+      ).resolves.toBe(false);
+
+      releaseSecondaryBuild?.();
+      await secondaryPublished;
       expect(
         getPreparedModelRuntimeSnapshot({
           agentId: "secondary",
@@ -706,9 +737,11 @@ describe("prepared model runtime catalog recovery", () => {
           inheritedAuthDir: "/tmp/unused-agent",
           workspaceDir: "/tmp/workspace-secondary",
         }),
-      ).toMatchObject({ agentId: "secondary" }),
-    );
-    expect(getPreparedModelRuntimeSnapshot(defaultInput)).not.toBe(initialDefault);
+      ).toMatchObject({ agentId: "secondary" });
+      expect(getPreparedModelRuntimeSnapshot(defaultInput)).not.toBe(initialDefault);
+    } finally {
+      unsubscribe();
+    }
   });
 
   it("recovers a captured generation after a newer unrelated replacement fails", async () => {

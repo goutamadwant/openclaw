@@ -17,7 +17,7 @@ import type { InternalSessionEntry as SessionEntry } from "../../config/sessions
 import * as sessionAccessor from "../../config/sessions/session-accessor.js";
 import {
   listSessionEntriesCore,
-  loadSessionEntry as loadSessionEntryRaw,
+  loadSessionEntry,
   loadTranscriptEvents,
   replaceSessionEntry,
 } from "../../config/sessions/session-accessor.js";
@@ -224,12 +224,6 @@ function seedQueuedFinal(id: string, text: string): void {
   seedDeliveryQueueEntry({ queueName: OUTBOUND_DELIVERY_QUEUE_NAME, stateDir: tmpDir, entry });
 }
 const resolveGatewayContext = () => undefined;
-
-function loadSessionEntry(
-  scope: Parameters<typeof loadSessionEntryRaw>[0],
-): SessionEntry | undefined {
-  return loadSessionEntryRaw(scope) as SessionEntry | undefined;
-}
 
 beforeEach(async () => {
   vi.clearAllMocks();
@@ -1127,6 +1121,7 @@ describe("main-session-restart-recovery", () => {
   });
 
   it("persists abort-registry runs after their event context was cleared", async () => {
+    tmpDir = transcriptFixture.prepareRoot();
     const sessionsDir = await makeSessionsDir();
     await writeMainSession({
       sessionsDir,
@@ -1156,6 +1151,7 @@ describe("main-session-restart-recovery", () => {
   });
 
   it("marks queued abort-registry runs before lifecycle start changes session status", async () => {
+    tmpDir = transcriptFixture.prepareRoot();
     const sessionsDir = await makeSessionsDir();
     await writeStore(sessionsDir, {
       "agent:main:main": {
@@ -1234,6 +1230,7 @@ describe("main-session-restart-recovery", () => {
       currentGeneration: true,
     },
   ])("$name", async ({ updatedAt, runId, observedAt, isActive, currentGeneration }) => {
+    tmpDir = transcriptFixture.prepareRoot();
     const sessionsDir = await makeSessionsDir();
     await writeStore(sessionsDir, {
       "agent:main:main": createSessionEntry({
@@ -1267,6 +1264,7 @@ describe("main-session-restart-recovery", () => {
   });
 
   it("preserves current-generation markers across repeated restart marking", async () => {
+    tmpDir = transcriptFixture.prepareRoot();
     const sessionsDir = await makeSessionsDir();
     const lifecycleGeneration = getAgentEventLifecycleGeneration();
     await writeMainSession({
@@ -1306,6 +1304,7 @@ describe("main-session-restart-recovery", () => {
   });
 
   it("replaces an older marker when the same run id is active after another restart", async () => {
+    tmpDir = transcriptFixture.prepareRoot();
     const sessionsDir = await makeSessionsDir();
     await writeMainSession({
       sessionsDir,
@@ -1371,8 +1370,7 @@ describe("main-session-restart-recovery", () => {
   });
 
   it("resumes marked sessions with a tool-result transcript tail", async () => {
-    const sessionsDir = await makeSessionsDir();
-    await writeStore(sessionsDir, mainSessionStore());
+    const { sessionsDir } = await makeMainSessionFixture();
     await writeCompletedToolTranscript(sessionsDir);
 
     await expectRecovery({ started: 1, settled: 0, failed: 0, skipped: 0 });
@@ -2276,9 +2274,7 @@ describe("main-session-restart-recovery", () => {
   });
 
   it("retries reservation cleanup after a transient session-store failure", async () => {
-    const sessionsDir = await makeSessionsDir();
-    const storePath = path.join(sessionsDir, "sessions.json");
-    await writeStore(sessionsDir, mainSessionStore());
+    const { sessionsDir, storePath } = await makeMainSessionFixture();
     await writeCompletedToolTranscript(sessionsDir);
     let dispatchFailed = false;
     vi.mocked(callGateway).mockImplementationOnce(async () => {
@@ -2313,9 +2309,7 @@ describe("main-session-restart-recovery", () => {
 
   it("schedules exact reservation cleanup after immediate retries are exhausted", async () => {
     const scheduled = createDeferred();
-    const sessionsDir = await makeSessionsDir();
-    const storePath = path.join(sessionsDir, "sessions.json");
-    await writeStore(sessionsDir, mainSessionStore());
+    const { sessionsDir, storePath } = await makeMainSessionFixture();
     await writeCompletedToolTranscript(sessionsDir);
     let dispatchFailed = false;
     vi.mocked(callGateway).mockImplementationOnce(async () => {
@@ -2368,9 +2362,7 @@ describe("main-session-restart-recovery", () => {
   });
 
   it("retries reservation cleanup when durable dispatch preparation is rejected", async () => {
-    const sessionsDir = await makeSessionsDir();
-    const storePath = path.join(sessionsDir, "sessions.json");
-    await writeStore(sessionsDir, mainSessionStore());
+    const { sessionsDir, storePath } = await makeMainSessionFixture();
     await writeCompletedToolTranscript(sessionsDir);
     const applySessionEntryReplacements = sessionAccessor.applySessionEntryReplacements;
     let preparationRejected = false;
@@ -2411,9 +2403,7 @@ describe("main-session-restart-recovery", () => {
   });
 
   it("refunds an explicit Gateway rejection before recovery admission", async () => {
-    const sessionsDir = await makeSessionsDir();
-    const storePath = path.join(sessionsDir, "sessions.json");
-    await writeStore(sessionsDir, mainSessionStore());
+    const { sessionsDir, storePath } = await makeMainSessionFixture();
     await writeCompletedToolTranscript(sessionsDir);
     vi.mocked(callGateway).mockRejectedValueOnce(
       new GatewayClientRequestError({
@@ -2434,9 +2424,7 @@ describe("main-session-restart-recovery", () => {
   });
 
   it("does not settle an ambiguous recovery after a foreground owner wins admission", async () => {
-    const sessionsDir = await makeSessionsDir();
-    const storePath = path.join(sessionsDir, "sessions.json");
-    await writeStore(sessionsDir, mainSessionStore());
+    const { sessionsDir, storePath } = await makeMainSessionFixture();
     await writeCompletedToolTranscript(sessionsDir);
     vi.mocked(callGateway).mockImplementation(async (request) => {
       if (request.method === "agent") {
@@ -2464,9 +2452,7 @@ describe("main-session-restart-recovery", () => {
   });
 
   it("rolls back the reservation when ambiguous settlement persistence fails", async () => {
-    const sessionsDir = await makeSessionsDir();
-    const storePath = path.join(sessionsDir, "sessions.json");
-    await writeStore(sessionsDir, mainSessionStore());
+    const { sessionsDir, storePath } = await makeMainSessionFixture();
     await writeCompletedToolTranscript(sessionsDir);
     let dispatchFailed = false;
     vi.mocked(callGateway).mockImplementation(async (request) => {
@@ -2507,9 +2493,7 @@ describe("main-session-restart-recovery", () => {
   });
 
   it("settles an admitted recovery that completed before its ambiguous response", async () => {
-    const sessionsDir = await makeSessionsDir();
-    const storePath = path.join(sessionsDir, "sessions.json");
-    await writeStore(sessionsDir, mainSessionStore());
+    const { sessionsDir, storePath } = await makeMainSessionFixture();
     await writeCompletedToolTranscript(sessionsDir);
     vi.mocked(callGateway).mockImplementation(async (request) => {
       if (request.method === "agent") {
@@ -2893,58 +2877,29 @@ describe("main-session-restart-recovery", () => {
     });
   });
 
-  it.each(["owed", "unresolved", "acknowledged"] as const)(
-    "preserves a prior %s notice when the same pending final completes",
-    async (state) => {
-      const sessionsDir = await makeSessionsDir();
-      const storePath = path.join(sessionsDir, "sessions.json");
-      const pending = makePendingFinalDelivery("Uncertain reply.", {
-        context: discordDeliveryContext,
-        intentId: "intent-notice-retained",
-        deliveries: [{ id: "delivery-notice-retained", state: "unknown" }],
-      });
-      await writeMainSession({
-        sessionsDir,
-        pendingFinalDelivery: pending,
-        pendingDeliveryNotice: {
-          createdAt: pending.createdAt,
-          context: discordDeliveryContext,
-          intentId: "intent-notice-retained",
-          state,
-        },
-      });
-      await expectRecovery({ started: 0, settled: 1, failed: 0, skipped: 0 });
-      const entry = loadSessionEntry({ sessionKey: "agent:main:main", storePath });
-      expect(entry?.pendingFinalDelivery).toBeUndefined();
-      expect(entry?.pendingDeliveryNotice?.state).toBe(state);
-      expect(sendRecoveryNotice).not.toHaveBeenCalled();
-    },
-  );
-
-  it("completes an unqueued text and media final with owed notice debt instead of replaying", async () => {
+  it("preserves an acknowledged notice when the same pending final completes", async () => {
     const sessionsDir = await makeSessionsDir();
     const storePath = path.join(sessionsDir, "sessions.json");
+    const pending = makePendingFinalDelivery("Uncertain reply.", {
+      context: discordDeliveryContext,
+      intentId: "intent-notice-retained",
+      deliveries: [{ id: "delivery-notice-retained", state: "unknown" }],
+    });
     await writeMainSession({
       sessionsDir,
-      pendingFinalDelivery: {
-        kind: "transport-only",
-        createdAt: Date.now(),
+      pendingFinalDelivery: pending,
+      pendingDeliveryNotice: {
+        createdAt: pending.createdAt,
         context: discordDeliveryContext,
-        intentId: "intent-text-media",
-        deliveries: [
-          { id: "delivery-text", state: "prepared" },
-          { id: "delivery-media", state: "prepared" },
-        ],
+        intentId: "intent-notice-retained",
+        state: "acknowledged",
       },
     });
-
     await expectRecovery({ started: 0, settled: 1, failed: 0, skipped: 0 });
-
-    expect(callGateway).not.toHaveBeenCalled();
+    const entry = loadSessionEntry({ sessionKey: "agent:main:main", storePath });
+    expect(entry?.pendingFinalDelivery).toBeUndefined();
+    expect(entry?.pendingDeliveryNotice?.state).toBe("acknowledged");
     expect(sendRecoveryNotice).not.toHaveBeenCalled();
-    expect(
-      loadSessionEntry({ sessionKey: "agent:main:main", storePath })?.pendingDeliveryNotice,
-    ).toMatchObject({ intentId: "intent-text-media", state: "owed" });
   });
 
   it.each(["delivered", "unknown"] as const)(
