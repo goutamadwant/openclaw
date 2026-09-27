@@ -195,8 +195,10 @@ describe("runSessionCompactionIfNeeded stale totalTokens gating", () => {
 
     const transcript = SessionManager.open(scope, rootDir);
     transcript.appendMessage({
-      role: "user",
+      role: "custom",
+      customType: "activity",
       content: "display only ".repeat(25_000),
+      display: true,
       excludeFromContext: true,
       timestamp: 1,
     });
