@@ -49,6 +49,7 @@ import {
   withRecentSessionTranscriptActiveEvents,
 } from "../../config/sessions/session-accessor.js";
 import { resolveSessionStorePathForScope } from "../../config/sessions/session-store-path.js";
+import { SessionTranscriptReadFenceError } from "../../config/sessions/session-transcript-read-fence.js";
 import {
   isSessionTranscriptLeafControl,
   selectSessionTranscriptLeafControlledPath,
@@ -499,6 +500,7 @@ async function estimateProviderPromptTokens(
 
 async function estimatePromptTokensFromSessionTranscript(params: {
   agentId?: string;
+  abortSignal?: AbortSignal;
   sessionId?: string;
   sessionKey?: string;
   storePath?: string;
@@ -554,12 +556,14 @@ async function estimatePromptTokensFromSessionTranscript(params: {
         transcriptByteSize: snapshot.byteSize,
       };
     }
-    const messages = await readPreflightTranscriptContextMessages({
-      agentId: params.agentId ?? resolveAgentIdFromSessionKey(params.sessionKey),
-      sessionId,
-      sessionKey: params.sessionKey,
-      storePath: params.storePath,
-    });
+    const messages = await readPreflightTranscriptContextMessages(
+      {
+        ...params,
+        agentId: params.agentId ?? resolveAgentIdFromSessionKey(params.sessionKey),
+        sessionId,
+      },
+      params.abortSignal,
+    );
     const estimatedTokens = await estimateProviderPromptTokens(
       messages,
       params.contextWindowTokens,
@@ -576,8 +580,9 @@ async function estimatePromptTokensFromSessionTranscript(params: {
       outputTokens: normalizedOutputTokens,
       transcriptByteSize: snapshot.byteSize,
     };
-  } catch {
-    return undefined;
+  } catch (error) {
+    params.abortSignal?.throwIfAborted();
+    return error instanceof SessionTranscriptReadFenceError ? Promise.reject(error) : undefined;
   }
 }
 
@@ -697,6 +702,7 @@ export async function runSessionCompactionIfNeeded(params: {
       ? undefined
       : await estimatePromptTokensFromSessionTranscript({
           ...compactionTarget,
+          abortSignal: params.abortSignal,
           sessionId: entry.sessionId,
           contextWindowTokens,
         });

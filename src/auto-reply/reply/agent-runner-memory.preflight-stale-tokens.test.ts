@@ -182,6 +182,30 @@ describe("runSessionCompactionIfNeeded stale totalTokens gating", () => {
     expect(compactEmbeddedAgentSessionMock).toHaveBeenCalledTimes(1);
   });
 
+  it("does not compact when the canonical context contains only excluded messages", async () => {
+    const storePath = path.join(rootDir, "sessions.json");
+    const sessionKey = "agent:main:main";
+    const sessionEntry: SessionEntry = {
+      sessionId: "session",
+      updatedAt: Date.now(),
+      totalTokensFresh: false,
+    };
+    const scope = { agentId: "main", sessionId: "session", sessionKey, storePath };
+    await upsertSessionEntryCore(scope, sessionEntry);
+
+    const transcript = SessionManager.open(scope, rootDir);
+    transcript.appendMessage({
+      role: "user",
+      content: "display only ".repeat(25_000),
+      excludeFromContext: true,
+      timestamp: 1,
+    });
+
+    await runWithEntry(sessionEntry, path.join(rootDir, "session.jsonl"));
+
+    expect(compactEmbeddedAgentSessionMock).not.toHaveBeenCalled();
+  });
+
   it("compacts when totalTokens is large and fresh", async () => {
     const sessionFile = path.join(rootDir, "session.jsonl");
     await fs.writeFile(
