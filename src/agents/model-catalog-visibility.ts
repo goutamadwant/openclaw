@@ -4,12 +4,13 @@
  * auth-backed availability.
  */
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.types.js";
 import { dedupeByKey } from "../shared/dedupe-by-key.js";
 import type {
   ModelAuthAvailabilityEvaluation,
   ModelAuthAvailabilityRef,
 } from "./model-auth-availability.js";
-import { compareModelCatalogEntries } from "./model-catalog-order.js";
+import { compareModelCatalogEntries, orderModelCatalogForPicker } from "./model-catalog-order.js";
 import type {
   ModelCatalogRoutePolicy,
   ModelCatalogRouteProjection,
@@ -39,6 +40,7 @@ type LogicalModelCatalogEntryState = {
   compatible: boolean;
   routeManaged: boolean;
   routeProjection: ModelCatalogRouteProjection;
+  nativeRuntime?: string;
 };
 
 /** Maps one shared auth evaluation into logical catalog selection state. */
@@ -59,6 +61,7 @@ export function resolveLogicalModelCatalogEntryState(params: {
     compatible: params.evaluation.routeResolution?.kind !== "incompatible",
     routeManaged,
     routeProjection,
+    ...(params.evaluation.runtimeAuth ? { nativeRuntime: params.evaluation.runtimeAuth.id } : {}),
   };
 }
 
@@ -78,6 +81,8 @@ type LogicalModelCatalogParams = {
   routePolicy: ModelCatalogRoutePolicy;
   routeVariants?: readonly ModelCatalogEntry[];
   retainedModel?: ModelRef;
+  selectedModel?: ModelRef;
+  metadataSnapshot?: PluginMetadataSnapshot;
 };
 
 /** Resolves logical rows while keeping provider-owned physical route precedence. */
@@ -153,6 +158,13 @@ export async function prepareLogicalVisibleModelCatalog(
       readers.set(key, await params.prepareEntry(variants[0] ?? entry, variants));
     }
   }
+  const { buildManifestBuiltInModelSuppressionResolver } =
+    await import("../plugins/manifest-model-suppression.js");
+  const suppression = buildManifestBuiltInModelSuppressionResolver({
+    config: params.cfg,
+    workspaceDir: params.workspaceDir,
+    metadataSnapshot: params.metadataSnapshot,
+  });
   const catalogKeys = new Set(params.catalog.map(createModelCatalogIdentityKeyResolver()));
   return () => {
     // Membership and row availability consume this one observation after every await.
@@ -166,15 +178,27 @@ export async function prepareLogicalVisibleModelCatalog(
       return state;
     };
     const projectEntries = (entries: readonly ModelCatalogEntry[]) => {
-      const projected = entries.map(
-        (entry) =>
-          catalogView.readProjection(
-            entry,
-            getEntryState(entry).routeProjection,
-            publicationKeyOf(entry),
-          ).entry,
+      const projected = entries.flatMap((entry) => {
+        const state = getEntryState(entry);
+        const row = catalogView.readProjection(
+          entry,
+          state.routeProjection,
+          publicationKeyOf(entry),
+        ).entry;
+        // A selected native runtime owns its opaque model; a donor label does not.
+        if (
+          !state.nativeRuntime &&
+          suppression({ provider: row.provider, id: row.id, api: row.api, baseUrl: row.baseUrl })
+            ?.retirement
+        ) {
+          return [];
+        }
+        return [row];
+      });
+      return orderModelCatalogForPicker(
+        dedupeByKey(projected, publicationKeyOf),
+        params.selectedModel ?? params.retainedModel,
       );
-      return sortModelCatalogEntries(dedupeByKey(projected, publicationKeyOf));
     };
     if (params.view === "all") {
       return projectEntries(params.catalog);

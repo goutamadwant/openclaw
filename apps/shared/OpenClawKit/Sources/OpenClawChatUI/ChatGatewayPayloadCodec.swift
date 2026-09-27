@@ -40,8 +40,10 @@ public enum OpenClawChatGatewayPayloadCodec {
             agents: result.agents.filter(\.isSelectableAgent).map {
                 OpenClawChatAgentChoice(
                     id: $0.id,
-                    name: $0.name,
-                    emoji: $0.identity?["emoji"]?.value as? String,
+                    name: OpenClawChatAgentChoice.normalizedName($0.name)
+                        ?? OpenClawChatAgentChoice.normalizedName($0.identity?["name"]?.value as? String),
+                    emoji: OpenClawChatAgentChoice.textAvatar($0.identity?["emoji"]?.value as? String)
+                        ?? OpenClawChatAgentChoice.textAvatar($0.identity?["avatar"]?.value as? String),
                     workspaceGit: $0.workspacegit)
             },
             sessionRoutingContract: OpenClawChatSessionRoutingContract.make(
@@ -111,7 +113,10 @@ public enum OpenClawChatGatewayPayloadCodec {
         return try OpenClawChatModelCatalogSnapshot(
             choices: decoded.models.map(self.modelChoice),
             availabilityIsSessionScoped: true,
-            refreshFailed: decoded.refreshfailed == true)
+            refreshFailed: decoded.refreshfailed == true,
+            modelSelectionPolicy: decoded.modelselectionpolicy.map {
+                try GatewayPayloadDecoding.decode(AnyCodable($0))
+            })
     }
 
     public static func decodeSessionRoutingIdentity(_ data: Data) throws -> OpenClawChatSessionRoutingIdentity {
@@ -175,12 +180,21 @@ public enum OpenClawChatGatewayPayloadCodec {
             acceptsArgs: entry.acceptsargs)
     }
 
+    private struct MetadataChangedPayload: Decodable {
+        let modelSelectionChanged: Bool?
+    }
+
     public static func event(from frame: EventFrame) -> OpenClawChatTransportEvent? {
         switch frame.event {
         case "tick":
             return .tick
-        case "chat.metadata.changed", "config.changed":
-            return .chatMetadataChanged
+        case "chat.metadata.changed":
+            let payload = frame.payload.flatMap {
+                try? GatewayPayloadDecoding.decode($0, as: MetadataChangedPayload.self)
+            }
+            return payload?.modelSelectionChanged == true ? .modelSelectionChanged : .chatMetadataChanged
+        case "config.changed":
+            return .modelSelectionChanged
         case "sessions.changed":
             guard let payload = frame.payload,
                   let change = try? GatewayPayloadDecoding.decode(
