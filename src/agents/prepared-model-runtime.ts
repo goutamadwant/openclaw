@@ -258,13 +258,6 @@ async function loadPreparedModelRuntimeOwner<T>(
     if (getBlockingReplacement()) {
       continue;
     }
-    if (!activated) {
-      return await projectPublishedModelRuntimeOwner(
-        input,
-        preparedModelRuntimeLeaseContext,
-        project,
-      );
-    }
     try {
       return await projectPublishedModelRuntimeOwner(
         input,
@@ -272,7 +265,7 @@ async function loadPreparedModelRuntimeOwner<T>(
         project,
       );
     } catch (error) {
-      if (!(error instanceof PreparedModelRuntimeOwnerNotPublishedError)) {
+      if (!activated || !(error instanceof PreparedModelRuntimeOwnerNotPublishedError)) {
         throw error;
       }
       // A concurrent publication boundary may retire the standalone owner between build and read.
