@@ -6,7 +6,7 @@ import {
   readCurrentProjectionSnapshot,
   type CurrentTranscriptProjection,
 } from "../config/sessions/session-accessor.sqlite-projection-read.js";
-import { readSessionTranscriptBindingFromProjection } from "../config/sessions/session-accessor.sqlite-task-history.js";
+import { readSessionTranscriptBindingFromProjection } from "../config/sessions/session-accessor.sqlite-transcript-binding.js";
 import type { SessionTranscriptRawDeltaLimits } from "../config/sessions/session-accessor.types.js";
 import { readWithCanonicalSessionAdmission } from "../config/sessions/session-canonical-key.js";
 import {
@@ -41,9 +41,7 @@ export function createBoundSessionHistorySubagentProjection(
     readSourceDatabases,
   );
   return {
-    isSubagentSession(sessionKey) {
-      return readSource(sessionKey);
-    },
+    isSubagentSession: readSource,
     isSubagentRunMessage(runId, messageSeq) {
       if (messageSeq === undefined) {
         return false;
@@ -120,8 +118,8 @@ export function createReadonlySessionHistoryReader(
       const { readArtifactSummariesFromProjection } = await import("./session-artifact-read.js");
       return readSnapshot((projection) => readArtifactSummariesFromProjection(projection, query));
     },
-    readTranscriptBinding: (run?: { id: string; maxBytes: number }) =>
-      readSnapshot((projection) => readSessionTranscriptBindingFromProjection(projection, run)),
+    readTranscriptBinding: () =>
+      readSnapshot((projection) => readSessionTranscriptBindingFromProjection(projection)),
     readTranscriptDisplayDelta: (limits: SessionTranscriptRawDeltaLimits) =>
       readSnapshot((projection) => readTranscriptDisplayDeltaFromProjection(projection, limits)),
     ...createSessionTranscriptReader({
