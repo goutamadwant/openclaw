@@ -690,6 +690,7 @@ export const databaseWorkerCoreTestFiles = [
   "src/agents/prepared-model-catalog-worker.custody.integration.test.ts",
   "src/agents/prepared-model-catalog-worker.directory.test.ts",
   "src/agents/prepared-model-catalog-worker.directory.integration.test.ts",
+  "src/agents/prepared-model-catalog-worker.generation-recovery.integration.test.ts",
   "src/agents/prepared-model-catalog-worker.integration.test.ts",
   "src/agents/prepared-model-catalog-worker.mismatch.integration.test.ts",
   "src/agents/prepared-model-catalog-worker.native.integration.test.ts",
