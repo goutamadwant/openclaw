@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -8,6 +7,7 @@ import {
 } from "../src/secrets/credential-matrix-docs.js";
 import { buildSecretRefCredentialMatrix } from "../src/secrets/credential-matrix.js";
 import { getSecretTargetRegistry } from "../src/secrets/target-registry-data.js";
+import { readSecretRefDocsFile, writeSecretRefDocsFile } from "./lib/secretref-docs-file.js";
 
 const args = new Set(process.argv.slice(2));
 const check = args.has("--check");
@@ -24,15 +24,17 @@ const matrixPath = path.join(
   "docs/reference/secretref-user-supplied-credentials-matrix.json",
 );
 const surfacePath = path.join(repoRoot, "docs/reference/secretref-credential-surface.md");
-const currentSurface = fs.readFileSync(surfacePath, "utf8");
+const currentSurface = readSecretRefDocsFile(repoRoot, surfacePath);
 const registry = getSecretTargetRegistry({
   sourceTree: true,
+  sourceTreeRoot: path.join(repoRoot, "extensions"),
+  env: {},
 });
 const matrix = buildSecretRefCredentialMatrix(registry);
 const artifacts = [
   {
     path: matrixPath,
-    current: fs.readFileSync(matrixPath, "utf8"),
+    current: readSecretRefDocsFile(repoRoot, matrixPath),
     expected: renderSecretRefCredentialMatrixJson(matrix),
   },
   {
@@ -56,7 +58,7 @@ if (check) {
 }
 
 for (const artifact of changed) {
-  fs.writeFileSync(artifact.path, artifact.expected, "utf8");
+  writeSecretRefDocsFile(repoRoot, artifact.path, artifact.expected);
   console.log(`Wrote ${path.relative(repoRoot, artifact.path)}`);
 }
 if (changed.length === 0) {
