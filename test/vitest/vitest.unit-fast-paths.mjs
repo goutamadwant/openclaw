@@ -102,7 +102,6 @@ export const forcedUnitFastTestFiles = [
   "src/system-agent/tui-backend.test.ts",
   "src/flows/channel-setup.status.test.ts",
   "src/flows/provider-flow.test.ts",
-  "src/context-engine/context-engine.test.ts",
   "src/entry.compile-cache.test.ts",
   "src/entry.respawn.test.ts",
   "src/entry.version-fast-path.test.ts",
@@ -203,7 +202,6 @@ const ownerRoutedUnitTestPatterns = [
   "src/agents/embedded-agent-runner/run/attempt.abort-race.test.ts",
   "src/agents/embedded-agent-runner/run/attempt.settled-turn-finalization-context.test.ts",
   "src/agents/openai-transport-stream.*.test.ts",
-  "src/agents/prepared-model-runtime.catalog-recovery.test.ts",
   // Split transport suites install module mocks through their shared harness.
   "src/agents/provider-transport-fetch.*.test.ts",
   "src/agents/embedded-agent-runner/run.inherited-auth-owner.test.ts",
