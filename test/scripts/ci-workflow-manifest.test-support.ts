@@ -53,6 +53,7 @@ export function runCiManifestFixture(options: {
   checkFamilyScope?: boolean;
   ciLintPlan?: Awaited<ReturnType<typeof createChangedCiLintPlan>>;
   ciTypeGraphNames?: string[];
+  ciTypeBoundaryFailure?: boolean;
   changedCoreTestSupport?: boolean;
   repository?: string;
   eventName?: "pull_request" | "push" | "workflow_dispatch" | "schedule";
@@ -352,6 +353,16 @@ export function runCiManifestFixture(options: {
         }
       `,
       );
+      writeFileSync(
+        path.join(root, "scripts/check-tsgo-core-boundary.mts"),
+        `export async function checkCoreTsgoGraphBoundary() {
+          console.log("fixture: core compiler boundary checked");
+          if (${options.ciTypeBoundaryFailure === true}) {
+            throw new Error("fixture: core compiler graph includes a bundled extension");
+          }
+          return [];
+        }\n`,
+      );
       for (const file of options.changedPaths ?? []) {
         const target = path.join(root, file);
         if (!existsSync(target)) {
@@ -595,6 +606,12 @@ export function runCiManifestFixture(options: {
     for (const name of ["test-prerequisites.mjs", "test-prerequisites.json"]) {
       writeFileSync(path.join(trustedGitOwner, name), readFileSync(path.join(gitOwner, name)));
     }
+    const trustedScripts = path.join(root, ".ci-harness/scripts");
+    mkdirSync(trustedScripts, { recursive: true });
+    copyFileSync(
+      new URL("../../scripts/ci-build-manifest.mjs", import.meta.url),
+      path.join(trustedScripts, "ci-build-manifest.mjs"),
+    );
     const trustedReleasePolicy = path.join(root, ".ci-harness/scripts/lib");
     mkdirSync(trustedReleasePolicy, { recursive: true });
     for (const name of ["release-context.mjs", "release-version.mjs"]) {
