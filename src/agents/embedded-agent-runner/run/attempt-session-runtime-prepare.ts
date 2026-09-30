@@ -1,5 +1,4 @@
 import type { ContextEngine } from "../../../context-engine/types.js";
-/** Prepares the session-owned runtime used by one embedded attempt. */
 import { createAnthropicPayloadLogger } from "../../anthropic-payload-log.js";
 import { createCacheTrace } from "../../cache-trace.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../defaults.js";
@@ -102,7 +101,6 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
     replayAllowedToolNames: toolSearchRunPlan.replayAllowedToolNames,
     resolveActiveContextEnginePluginId: input.resolveActiveContextEnginePluginId,
     sessionAgentId,
-    transcriptLifecycle: sessionLock.transcriptLifecycle,
     withOwnedTranscriptWrite: sessionLock.withOwnedTranscriptWrite,
   });
   const { isOpenAIResponsesApi, preparedUserTurnMessage, sessionManager, transcriptPolicy } =
@@ -130,7 +128,6 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
       deferredDirectoryToolsCallable,
       effectiveTools,
       replaySafetyOptions,
-      sandboxEnabled: Boolean(sandbox?.enabled),
       sandboxSessionKey,
       sessionAgentId,
       toolSearchCatalogRef,
@@ -254,6 +251,7 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
 
   const transport = await prepareEmbeddedAttemptTransport({
     attempt,
+    assertCronRootCurrent: sessionLock.assertCronRootCurrent,
     session: activeSession,
     settingsManager,
     providerThinkingLevel,

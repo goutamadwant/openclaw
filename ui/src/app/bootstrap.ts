@@ -103,7 +103,6 @@ export type ApplicationRuntime = {
 };
 
 type PendingRouterStartNavigation = {
-  routeId: RouteId;
   location: RouteLocation;
   mode: "push" | "replace";
 };
@@ -314,8 +313,12 @@ export function bootstrapApplication(): ApplicationRuntime {
   const stopConfigWriteSuspension = bindUpdateConfigWriteInterlock(overlays, runtimeConfig);
   const navigation = createApplicationNavigationPreferences(theme);
   const nativeChatDrafts = createNativeChatDrafts();
-  const linkReaderRouting = startLinkReaderRouting(() => gateway.snapshot);
+  const shouldOpenExternally = () => theme.settings.openLinksExternally === true;
+  const linkReaderRouting = startLinkReaderRouting(() => gateway.snapshot, {
+    shouldOpenExternally,
+  });
   const nativeLinkRouting = startNativeLinkRouting({
+    shouldOpenExternally,
     signal: startupLifecycle.signal,
     canPresentBrowserPanel: () => {
       const shell = document.querySelector<HTMLElement & { routeState: ShellRouteState }>(
@@ -463,7 +466,7 @@ export function bootstrapApplication(): ApplicationRuntime {
     const location = routeLocation(routeId, options);
     // Preserve pre-start navigation exactly as the fire-and-forget entry point does.
     if (!routerStarted) {
-      pendingRouterStartNavigation = { routeId, location, mode: requested };
+      pendingRouterStartNavigation = { location, mode: requested };
     }
     // Re-clicking the active nav item must not stack identical history
     // entries: Back would appear dead until every duplicate is popped.

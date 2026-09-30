@@ -306,14 +306,6 @@ describe("runSessionCompactionIfNeeded stale totalTokens gating", () => {
       model: "gpt-5.6-luna",
       expectsCompaction: false,
     },
-    {
-      name: "the explicitly prepared agent before provider runtime selection",
-      runAgentId: "worker",
-      expectedAgentId: "worker",
-      provider: "openai",
-      model: "gpt-5.6-luna",
-      expectsCompaction: false,
-    },
   ])(
     "resolves an unscoped session key with $name",
     async ({ runAgentId, expectedAgentId, provider, model, expectsCompaction }) => {

@@ -26,7 +26,8 @@ import {
 import { loadChatHistory } from "./chat-history.ts";
 import { QUEUED_EDIT_RETENTION_CHANGE_EVENT } from "./chat-page-retained-sessions.ts";
 import { ChatPaneBoard } from "./chat-pane-board.ts";
-import { consumePaneSessionHandoff, type PaneSessionHandoff } from "./chat-pane-shared.ts";
+import type { PaneSessionHandoff } from "./chat-pane-handoff-lifecycle.ts";
+import { consumePaneSessionHandoff } from "./chat-pane-shared.ts";
 import { retirePullRequestRefreshes } from "./chat-pull-request-refresh.ts";
 import { stopChatRealtimeTalk } from "./chat-realtime.ts";
 import { resumeStoredChatOutboxes } from "./chat-send-actions.ts";
@@ -36,7 +37,7 @@ import { invalidateImageLightbox } from "./chat-state-page.ts";
 import { refreshChatMetadata } from "./chat-state-refresh.ts";
 import { resolveChatAgentId, selectedChatSessionRow } from "./chat-state-route.ts";
 import { getChatComposerState } from "./components/chat-composer-state.ts";
-import { dismissConfirmedActionPopovers } from "./components/chat-message.ts";
+import { dismissConfirmedActionPopovers } from "./components/chat-message-confirmation.ts";
 import { clearSessionWorkspacePreviews } from "./components/chat-session-workspace-state.ts";
 import {
   dismissThreadPortals,
