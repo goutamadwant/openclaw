@@ -95,6 +95,11 @@ describe("active-context preflight compaction", () => {
           limit: 20,
         });
         expect(JSON.stringify(history.messages ?? [])).toContain(REPLY_MARKER);
+        expect(
+          SessionManager.open(scope, instance.state.workspaceDir)
+            .getEntries()
+            .filter((entry) => entry.type === "compaction"),
+        ).toHaveLength(1);
       } finally {
         await disconnectGatewayClient(client);
       }
