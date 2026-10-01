@@ -13,6 +13,7 @@ import {
 import { PreparedModelRuntimeAuthPublicationOwner } from "./prepared-model-runtime-auth-publication.js";
 import {
   advancePreparedModelRuntimeConfig,
+  beginPreparedModelRuntimePluginDrain,
   getPreparedModelRuntimeSnapshot,
   loadPublishedGatewayReplyDispatchRuntime,
   prepareModelRuntimeSnapshot,
@@ -37,6 +38,35 @@ describe("prepared model runtime catalog recovery", () => {
 
   afterEach(async () => {
     await state.cleanup();
+  });
+
+  it("waits for plugin drain before rebuilding a mismatched catalog", async () => {
+    mocks.configuredAgentIds = ["default"];
+    const config = {};
+    await refreshPreparedModelRuntimeSnapshots(config, { gatewayLifecycle: true });
+    const input = {
+      agentId: "default",
+      config,
+      agentDir: "/tmp/unused-agent",
+      inheritedAuthDir: "/tmp/unused-agent",
+      workspaceDir: "/tmp/unused-workspace",
+    };
+    const initial = getPreparedModelRuntimeSnapshot(input);
+    if (!initial) {
+      throw new Error("default prepared model runtime owner was not published");
+    }
+    const priorBuilds = mocks.ensureOpenClawModelsJson.mock.calls.length;
+    const drain = beginPreparedModelRuntimePluginDrain();
+    try {
+      const recovery = replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch(initial);
+      await Promise.resolve();
+      expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(priorBuilds);
+      drain.release();
+      await expect(recovery).resolves.toBe(true);
+      expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(priorBuilds + 1);
+    } finally {
+      drain.release();
+    }
   });
 
   it("drains queued auth mutations before rebuilding reply dispatch", async () => {

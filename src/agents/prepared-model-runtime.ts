@@ -502,7 +502,7 @@ export async function replacePreparedModelRuntimeSnapshotAfterCatalogGenerationM
       rejectAuthPublication: (replacement, error) =>
         authPublication.rejectAdopted(replacement.gateId, error),
       removeReplyDispatch: (agentIds) => replyDispatchPublication.remove(agentIds),
-      enqueuePublication: (task) => publicationQueue.enqueue(task),
+      enqueuePublication: (task) => modelRuntimeDrain.runAfter(publicationQueue, task),
       drainPendingAuthMutations: (commit, required, error) => drainAuth(commit, required, error),
   }, identity);
 }
