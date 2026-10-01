@@ -11,6 +11,10 @@ import { runtimeProcessEntrypoints } from "../infra/runtime-process-entrypoints.
 import { resolveRuntimeWorkerUrl } from "../infra/runtime-worker-url.js";
 import { WorkerTaskError, WorkerTaskPool } from "../infra/worker-task-pool.js";
 import type { Model } from "../llm/types.js";
+import {
+  captureRemoteModelCatalogSnapshot,
+  type ActiveRemoteModelCatalog,
+} from "../model-catalog/remote-overlay.js";
 import { resolveInstalledManifestRegistryIndexFingerprint } from "../plugins/manifest-registry-installed.js";
 import {
   getPluginCacheRetirementSignal,
@@ -52,6 +56,7 @@ import type { AuthStorageData } from "./sessions/auth-storage.js";
 
 export type PreparedModelCatalogWorkerInput = Readonly<{
   generationFingerprint: string;
+  remoteCatalog: ActiveRemoteModelCatalog | null;
   input: PreparedModelRuntimeInput & { env: NodeJS.ProcessEnv };
   sourceConfigForSecrets: PreparedModelRuntimeInput["config"];
   configResolutionFacts: ReturnType<typeof serializeConfigResolutionFacts>;
@@ -338,6 +343,8 @@ export function fingerprintPreparedModelCatalogGeneration(
   params: Omit<PreparedModelCatalogWorkerInput, "generationFingerprint">,
 ): string {
   return fingerprintPreparedRuntimeFacts({
+    remoteCatalogSource: params.remoteCatalog?.sourceUrl,
+    remoteCatalogRevision: params.remoteCatalog?.revision,
     input: { ...params.input, config: fingerprintPreparedModelCatalogConfig(params.input.config) },
     sourceConfigForSecrets: fingerprintPreparedModelCatalogConfig(params.sourceConfigForSecrets),
     configResolutionFacts: params.configResolutionFacts,
@@ -355,6 +362,8 @@ export function fingerprintPreparedModelCatalogPluginContext(
   value: PreparedModelCatalogWorkerInput,
 ): string {
   return fingerprintPreparedRuntimeFacts({
+    remoteCatalogSource: value.remoteCatalog?.sourceUrl,
+    remoteCatalogRevision: value.remoteCatalog?.revision,
     config: fingerprintPreparedModelCatalogConfig(value.input.config),
     sourceConfigForSecrets: fingerprintPreparedModelCatalogConfig(value.sourceConfigForSecrets),
     configResolutionFacts: value.configResolutionFacts,
@@ -397,6 +406,7 @@ export function createPreparedModelCatalogWorkerInput(params: {
   const cache = getPluginMetadataSnapshotCache(params.pluginMetadataSnapshot);
   const index = overlayPluginNativeAdmissions(pluginMetadataSnapshot.index, cache);
   const value: Omit<PreparedModelCatalogWorkerInput, "generationFingerprint"> = {
+    remoteCatalog: captureRemoteModelCatalogSnapshot(),
     input,
     sourceConfigForSecrets,
     configResolutionFacts,
