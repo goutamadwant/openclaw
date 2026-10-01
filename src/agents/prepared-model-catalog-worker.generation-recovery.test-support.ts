@@ -4,7 +4,7 @@ import path from "node:path";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { Worker } from "node:worker_threads";
 import { expect, vi } from "vitest";
-import { withTestTimeout } from "../../test/helpers/promise.js";
+import { withinTest } from "../../test/helpers/promise.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { loadGatewayModelCatalogSnapshot } from "../gateway/server-model-catalog.js";
 import { createDeferredCore } from "../shared/deferred.js";
@@ -32,7 +32,7 @@ type GenerationRecoveryFixture = {
 export async function expectPublishedOwnerRecoveryAfterGenerationMismatch(
   fixture: GenerationRecoveryFixture,
   armGenerationMismatch: () => void,
-  options: { activeHealthyBorrower?: boolean; sharedAgentDir?: boolean } = {},
+  options: { activeHealthyBorrower?: boolean; sharedAgentDir?: boolean; signal: AbortSignal },
 ): Promise<void> {
   for (const [key, value] of Object.entries(fixture.env)) {
     if (value !== undefined) {
@@ -190,11 +190,7 @@ export async function expectPublishedOwnerRecoveryAfterGenerationMismatch(
       // rebind it to the replacement pool.
       await expect(healthyWaiter).resolves.toBeDefined();
     }
-    await withTestTimeout(
-      recoveredMainPublished.promise,
-      30_000,
-      "Recovered main runtime did not publish",
-    );
+    await withinTest(recoveredMainPublished.promise, options.signal);
     const recoveredMain = getPreparedModelRuntimeSnapshot(inputs[0]!);
     expect(recoveredMain).toBeDefined();
     expect(recoveredMain).not.toBe(published[0]);

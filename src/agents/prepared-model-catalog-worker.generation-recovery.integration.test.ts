@@ -15,6 +15,7 @@ describe("prepared model catalog generation recovery", () => {
   const verifyRecovery = async (options: {
     activeHealthyBorrower?: boolean;
     sharedAgentDir?: boolean;
+    signal: AbortSignal;
   }) => {
     const fixture = await createStaticSnapshot(0);
     const run = Reflect.get(
@@ -79,11 +80,13 @@ describe("prepared model catalog generation recovery", () => {
     }
   };
 
-  it("keeps a distinct warmed owner with the same agent directory usable", async () => {
-    await verifyRecovery({ sharedAgentDir: true });
+  it("keeps a distinct warmed owner with the same agent directory usable", async ({ signal }) => {
+    await verifyRecovery({ sharedAgentDir: true, signal });
   });
 
-  it("keeps an active healthy borrower reusable after collateral pool closure", async () => {
-    await verifyRecovery({ activeHealthyBorrower: true });
+  it("keeps an active healthy borrower reusable after collateral pool closure", async ({
+    signal,
+  }) => {
+    await verifyRecovery({ activeHealthyBorrower: true, signal });
   });
 });
