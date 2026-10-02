@@ -2595,15 +2595,17 @@ async function validateStrictChildRun({
         ? []
         : await client.getParentJobs(runId);
   }
+  const policyChild = {
+    conclusion: run.conclusion,
+    jobs,
+    key: child.manifestKey,
+    runId,
+    status: run.status,
+  };
   if (
     run.repository?.full_name !== repository ||
     run.head_sha !== (plannedChild?.workflowSha ?? parentEvidence.manifest.workflowSha) ||
-    !terminalPolicyPass({
-      conclusion: run.conclusion,
-      jobs,
-      key: child.manifestKey,
-      status: run.status,
-    })
+    !terminalPolicyPass(policyChild)
   ) {
     throw new Error(`manifest child run does not pass release policy: ${child.name}`);
   }
@@ -2616,7 +2618,7 @@ async function validateStrictChildRun({
   }
 
   return {
-    advisoryJobs: releaseAdvisoryJobs([{ key: child.manifestKey, runId, jobs }]),
+    advisoryJobs: releaseAdvisoryJobs([policyChild]),
     conclusion: run.conclusion,
     dispatchNonce: `full-release-validation-${reused ? childReuse.sourceParentRunId : parentEvidence.manifest.runId}-${originAttempt}${child.suffix}`,
     displayTitle: run.display_title,

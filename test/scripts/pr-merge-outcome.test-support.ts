@@ -174,7 +174,7 @@ export function createMergeOutcomeFixtureHarness() {
         gates?: string;
         restPolicy?: string;
         priorCi?: Partial<ReturnType<typeof createPriorCiFixtureState>>;
-        postAuthorityRestBoundary?: "start" | "complete";
+        afterRestMainReads?: number;
         afterPolicyRead?: boolean;
       },
       restObservationAppliedAt: 0,
@@ -311,6 +311,14 @@ if(route==="watch") {
 if(route==="sleep") {s.settlementSleeps.push(Number(args[0]));save();process.exit(0);}
 s.nodeArgs=process.execArgv;
 s.calls.push([route,...args]);save();
+let inputPayload;
+if(args[0]==="api"&&args.includes("--input")) {
+  const inputPath=args[args.indexOf("--input")+1];
+  if(inputPath==="-"||!require("node:path").isAbsolute(inputPath)) fail("API payload must use an absolute file, not stdin");
+  if(!fs.statSync(inputPath).isFile()) fail("API payload file is unavailable");
+  if(fs.readFileSync(0).length) fail("API payload leaked to child stdin");
+  inputPayload=fs.readFileSync(inputPath,"utf8");
+}
 if(args.some(arg=>arg.includes("{owner}")||arg.includes("{repo}"))) fail("protected unresolved repository placeholder");
 const main=()=>git(["--git-dir="+process.env.FIXTURE_REMOTE,"rev-parse","refs/heads/main"]);
 const quota=()=>{
@@ -440,7 +448,7 @@ else if(args[0]==="api"&&args.includes("user")) {
 }
 else if(args[0]==="api"&&args.includes("repos/fixture/repo/pulls/123")) {
   if(s.repoAuthorityUnavailable) fail("repository metadata unavailable");
-  if(s.restObservation&&!s.restObservation.afterPolicyRead&&s.restObservation.postAuthorityRestBoundary===undefined&&
+  if(s.restObservation&&!s.restObservation.afterPolicyRead&&s.restObservation.afterRestMainReads===undefined&&
     (s.quotaTriggered||(s.graphqlMergeProjection&&s.observationReads>0))) {
     applyRestObservation();
   }
@@ -479,15 +487,7 @@ else if(args[0]==="api"&&args.includes("repos/fixture/repo/git/ref/heads/main"))
     if(s.restMainFault==="unavailable-sha-once") {reference.object.sha="f".repeat(40);s.restMainFault="";save();}
   }
   out(reference);
-  if(s.restObservation?.postAuthorityRestBoundary) {
-    const isMainRead=(call)=>call.includes("repos/fixture/repo/git/ref/heads/main");
-    const authority=s.calls.findLastIndex((call)=>call.includes("orgs/fixture/memberships/fixture-operator"));
-    // The initial authority read precedes REST selection; target the next observation after revalidation.
-    if(authority>=0&&s.calls.slice(0,authority).some(isMainRead)) {
-      const reads=s.calls.slice(authority+1).filter(isMainRead).length;
-      if(reads===(s.restObservation.postAuthorityRestBoundary==="start"?1:2)) applyRestObservation();
-    }
-  }
+  if(s.restObservation?.afterRestMainReads===s.restMainReads) applyRestObservation();
   if(s.pr.state==="MERGED"&&s.restAdvanceMain) {s.restAdvanceMain=false;advanceMain();}
 }
 else if(args[0]==="api"&&args.includes("repos/fixture/repo/branches/main/protection")) {
@@ -563,14 +563,14 @@ else if(args[0]==="pr"&&args[1]==="view") {
   s.mutations++;
   if(s.quotaAt==="mutation") {s.quotaAt="observe";quota();}
   if(restMerge) {
-    if(!args.includes("PUT")||args[args.indexOf("--input")+1]!=="-") fail("invalid REST merge request");
-    s.restMergePayload=JSON.parse(fs.readFileSync(0,"utf8"));
+    if(!args.includes("PUT")) fail("invalid REST merge request");
+    s.restMergePayload=JSON.parse(inputPayload);
     if(s.restMergePayload.sha!==s.pr.headRefOid||s.restMergePayload.merge_method!=="squash") fail("unpinned REST merge request");
     s.mergeBody=s.restMergePayload.commit_message;
     if(s.restMergeRefusal) {save();process.stdout.write(s.restMergeRefusal);process.exit(1);}
   }
   if(graphqlMerge) {
-    const payload=JSON.parse(fs.readFileSync(0,"utf8"));
+    const payload=JSON.parse(inputPayload);
     if(payload.query!=="mutation PullRequestMerge($input:MergePullRequestInput!){mergePullRequest(input:$input){clientMutationId}}") fail("invalid direct merge mutation");
     const input=payload.variables.input;
     if(JSON.stringify(Object.keys(input).sort())!==JSON.stringify(["commitBody","expectedHeadOid","mergeMethod","pullRequestId"])||
@@ -714,7 +714,8 @@ pr_gh() {
 pr_gh_plain() {
   if [ "$1" = repo-authority ] || [ "$1" = issue-comments ] || [ "$1" = writer-login ]; then
     pr_gh_run plain "$@"
-  elif { [ "$1" = pr ] && [ "$2" = view ]; } ||
+  elif { [ "$1" = api ] && [[ " $* " == *" --input "* ]]; } ||
+    { [ "$1" = pr ] && [ "$2" = view ]; } ||
     { [ "$FIXTURE_REAL_GH" = true ] && { [ "$1" = pr ] && { [ "$2" = checks ] || [ "$2" = merge ]; } || [[ " $* " == *" graphql "* ]]; }; }; then
     pr_gh_run "\${pr_gh_quota_route:-plain}" "$@"
   else
@@ -730,6 +731,18 @@ verify_crabbox_admin_merge_bypass() {
 # Fault the Git boundary, not the outcome owner: crash after intent CAS, or
 # reject later receipt writes. All successful object/ref operations are real.
 pr_git() {
+  if [ "$1" = --no-lazy-fetch ] && [ "\${3:-}" = '--batch-check=%(objectname) %(objecttype)' ] &&
+    [ -n "$(command jq -r .priorCi.localOnlyQueryFault "$FIXTURE_STATE")" ]; then
+    local candidate; IFS= read -r candidate
+    printf '%s missing\\n' "$candidate"
+    [ "$(command jq -r .priorCi.localOnlyQueryFault "$FIXTURE_STATE")" != stderr ] || { echo 'permission denied' >&2; return 0; }
+    return 128
+  fi
+  if [ "$1" = --no-lazy-fetch ] && [ "\${2:-}" = cat-file ] && [ "\${3:-}" = -e ] &&
+    [ "\${4:-}" = "$(command jq -r .priorCi.localOnlyFailureOid "$FIXTURE_STATE")^{commit}" ]; then
+    command jq -r .priorCi.localOnlyFailureStderr "$FIXTURE_STATE" >&2
+    return 128
+  fi
   if [ "$1" = --no-lazy-fetch ] &&
     [ "$(command jq -r .priorCi.unsupportedNoLazy "$FIXTURE_STATE")" = true ]; then return 129; fi
   if [ "$1" = fetch ] && [ "\${2:-}" = --no-tags ] && [ "\${3:-}" = --no-write-fetch-head ] &&

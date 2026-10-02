@@ -26,24 +26,18 @@ Read only the references needed for the selected phase:
 
 ## Shared release boundaries
 
-Windows Node unit-test CI shards (`checks-windows-node-*`) in FRV's `normalCi`
-child are advisory for Release Decision and publication. The named
-`windows-node-ci` class belongs to `scripts/full-release-validation-policy.mjs`;
-failures remain recorded in the decision, GitHub step summary, and release
-evidence manifest. It is policy-derived, never an operator input or waiver.
-Ordinary PR, push, scheduled, and main CI keep Windows blocking.
-
-Every other selected validation lane must succeed: macOS Node and other normal
-CI jobs, install smoke, survivor lanes, `update-first-hop-compat*`, pack/npm
-qualification, package integrity, and Linux/Windows/macOS Gateway checks,
-including Windows packaged install/upgrade checks in Release Checks. A cancelled
-run still blocks. Preserve first failures and classify each one as below
-before recovery. Stable publication requires stable/full
-evidence, soak, and blocking performance. Beta-profile evidence cannot authorize
-stable publication. No lane or soak waiver can bypass these requirements.
-All nine Gateway install/upgrade combinations across Linux, Windows, and macOS
-are required for all-group qualification. Preserve identity, provenance,
-complete evidence, and existing publication approvals.
+Every selected validation lane must succeed: Windows and macOS Node and other
+normal CI jobs, install smoke, survivor
+lanes, `update-first-hop-compat*`, pack/npm qualification, package integrity,
+and Linux/Windows/macOS Gateway checks, including Windows packaged
+install/upgrade checks in Release Checks. A cancelled run still blocks. Preserve
+first failures and classify each one as below before recovery. Stable
+publication requires stable/full evidence, soak, and blocking performance.
+Beta-profile evidence cannot authorize stable publication. No lane or soak
+waiver can bypass these requirements. All nine Gateway install/upgrade
+combinations across Linux, Windows, and macOS are required for all-group
+qualification. Preserve identity, provenance, complete evidence, and existing
+publication approvals.
 
 Every failed test gets an explicit lead decision, real release blocker or
 flake, recorded in the handoff with its evidence: the same SHA passing
@@ -51,13 +45,12 @@ elsewhere or on rerun, no relation to the release delta, a runner or infra
 signature, a history of the same case flaking, or a pre-existing product bug
 that is not a regression (for example the 2026.9.6 "Assign to…" bug). A real
 blocker is a regression in shipped bytes or behavior, or an update/install/
-publish defect; fix it on the release branch. A flake never blocks: rerun it on
+publish defect; fix it on the release branch. Rerun a flake on
 the same Release SHA with at most two recorded reruns by default, and file a
 fix-in-parallel issue or PR on `main` with the evidence. Never re-cut, change
-tooling, or start a new FRV for a flake. Main-only failures and infrastructure
+tooling, or start a new FRV for a flake. A flake that remains red blocks publication. Main-only failures and infrastructure
 failures (runner outages, GitHub ghost jobs, hosted-runner offload) count as
-flakes for the release. The publish gate does not yet accept a recorded flake
-classification, so a flake still red after its reruns goes to the operator.
+flakes for the release.
 
 Dependency advisories never delay a release. A newly published advisory is
 never a reason to re-cut, change tooling, or rerun validation. Record it in the
@@ -160,7 +153,6 @@ Required publication proofs and enforced environment approvals remain required.
 A passing sibling cannot replace missing required evidence. npm + ClawHub is the
 priority path. macOS, Windows, Linux, and Android native publication runs in
 parallel and never gates npm/ClawHub, GitHub release finalization, or main closeout.
-Selected Windows/macOS Gateway, macOS Node, and native-app CI failures block
-release validation; only the `windows-node-ci` class above is advisory. Platform
-publishers retain their own artifact
+Selected Windows Node, Linux/Windows/macOS Gateway, and native-app CI failures
+block release validation. Platform publishers retain their own artifact
 and updater contracts; report pending platforms and proof gaps accurately.
