@@ -55,6 +55,12 @@ export function findRetiredConfigUpgradeRequirement(
     ]);
     checkKeys(scope.sandbox, `${configPath}.sandbox`, ["perSession"]);
     checkKeys(scope.silentReply, `${configPath}.silentReply`, ["direct"]);
+    checkKeys(scope.model, `${configPath}.model`, ["timeoutMs"]);
+    checkKeys(
+      isRecord(scope.subagents) ? scope.subagents.model : undefined,
+      `${configPath}.subagents.model`,
+      ["timeoutMs"],
+    );
     checkMemoryStore(scope, `${configPath}.`);
   });
   if (isRecord(config.surfaces)) {
@@ -82,6 +88,67 @@ export function findRetiredConfigUpgradeRequirement(
   checkKeys(config.gateway, "gateway", ["webchat"]);
   checkKeys(channels, "channels", ["webchat"]);
   checkKeys(channels.telegram, "channels.telegram", ["requireMention"]);
+  const beforeDiscord = retired.length;
+  visitChannelEntries(config, "discord", (scope, configPath) => {
+    const voice = isRecord(scope.voice) ? scope.voice : {};
+    checkKeys(voice.tts, `${configPath}.voice.tts`, ["openai", "elevenlabs", "microsoft", "edge"]);
+    for (const [guildId, guild] of Object.entries(isRecord(scope.guilds) ? scope.guilds : {})) {
+      const guildChannels = isRecord(guild) && isRecord(guild.channels) ? guild.channels : {};
+      for (const [channelId, channel] of Object.entries(guildChannels)) {
+        checkKeys(channel, `${configPath}.guilds.${guildId}.channels.${channelId}`, [
+          "allow",
+          "agentId",
+        ]);
+      }
+    }
+  });
+  const bridgeVersion = retired.length > beforeDiscord ? "2026.9.7" : "2026.9.5";
+  visitChannelEntries(config, "telegram", (scope, configPath) => {
+    checkKeys(scope, configPath, [
+      "streamMode",
+      "chunkMode",
+      "blockStreaming",
+      "blockStreamingCoalesce",
+      "draftChunk",
+    ]);
+    if (isRecord(scope.dm)) {
+      retired.push(`${configPath}.dm`);
+    }
+    if (typeof scope.streaming === "boolean" || typeof scope.streaming === "string") {
+      retired.push(`${configPath}.streaming`);
+    }
+    const streaming = isRecord(scope.streaming) ? scope.streaming : {};
+    checkKeys(streaming.preview, `${configPath}.streaming.preview`, [
+      "nativeToolProgress",
+      "nativeToolProgressAllowFrom",
+    ]);
+    if (isRecord(scope.direct)) {
+      for (const [chatId, direct] of Object.entries(scope.direct)) {
+        checkKeys(direct, `${configPath}.direct.${chatId}`, ["threadReplies"]);
+      }
+    }
+  });
+  visitChannelEntries(config, "matrix", (scope, configPath) => {
+    checkKeys(scope, configPath, ["allowPrivateNetwork"]);
+    if (isRecord(scope.dm) && scope.dm.policy === "trusted") {
+      retired.push(`${configPath}.dm.policy`);
+    }
+    for (const section of ["groups", "rooms"]) {
+      const rooms = scope[section];
+      if (isRecord(rooms)) {
+        for (const [roomId, room] of Object.entries(rooms)) {
+          checkKeys(room, `${configPath}.${section}.${roomId}`, ["allow"]);
+        }
+      }
+    }
+  });
+  visitChannelEntries(config, "slack", (scope, configPath) => {
+    if (isRecord(scope.channels)) {
+      for (const [channelId, channel] of Object.entries(scope.channels)) {
+        checkKeys(channel, `${configPath}.channels.${channelId}`, ["allow"]);
+      }
+    }
+  });
   for (const channelId of ["discord", "line", "matrix", "telegram"]) {
     visitChannelEntries(config, channelId, (scope, configPath) => {
       checkKeys(scope.threadBindings, `${configPath}.threadBindings`, ["ttlHours"]);
@@ -104,7 +171,7 @@ export function findRetiredConfigUpgradeRequirement(
   return {
     message: `Config contains retired pre-July-2026 settings: ${retired.join(", ")}. Doctor cannot remove these settings safely.`,
     nextAction:
-      `Install OpenClaw 2026.9.5, run "${formatCliCommand("openclaw doctor --fix")}", then upgrade to latest. ` +
+      `Install OpenClaw ${bridgeVersion}, run "${formatCliCommand("openclaw doctor --fix")}", then upgrade to latest. ` +
       "See https://docs.openclaw.ai/install/updating#upgrading-very-old-versions.",
   };
 }
