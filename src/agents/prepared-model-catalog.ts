@@ -27,6 +27,7 @@ import {
 import { readCapturedPreparedModelRuntimeCatalog } from "./prepared-model-runtime.capture.js";
 import {
   PreparedModelCatalogGenerationMismatchError,
+  isPreparedModelRuntimeMissingOwnerError,
   PreparedModelRuntimePublicationSupersededError,
 } from "./prepared-model-runtime.errors.js";
 import { isPreparedModelCatalogFull } from "./prepared-model-runtime.full-catalog.js";
@@ -286,7 +287,7 @@ async function resolveReadOnlyPublishedModelCatalogOwner(
         throw new PreparedModelCatalogConfigReplacedError(candidate.agentDir);
       }
     } catch (error) {
-      if (!(error instanceof PreparedModelRuntimeOwnerNotPublishedError)) {
+      if (!isPreparedModelRuntimeMissingOwnerError(error)) {
         throw error;
       }
     }
@@ -323,7 +324,7 @@ async function resolvePreparedModelCatalogOwnerSnapshotWithPolicy(
     }
     await preparedExact.release?.();
   } catch (error) {
-    if (!(error instanceof PreparedModelRuntimeOwnerNotPublishedError)) {
+    if (!isPreparedModelRuntimeMissingOwnerError(error)) {
       throw error;
     }
   }
