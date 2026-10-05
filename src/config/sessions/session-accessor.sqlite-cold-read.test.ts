@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { isMainThread, threadId } from "node:worker_threads";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { trackSqliteStatementExecutions } from "../../../test/helpers/sqlite-statement-execution-counter.js";
-import { visitSessionMessagesAsync } from "../../gateway/session-transcript-readers.js";
+import { visitSessionMessagesAsync } from "../../gateway/session-transcript-native.test-support.js";
 import {
   clearNodeSqliteKyselyCacheForDatabase,
   executeSqliteQuerySync,
@@ -125,7 +125,7 @@ async function createHotRaceSeed(state: OpenClawTestState) {
   await expect(
     runSessionColdStorageMaintenance({
       config: {
-        agents: { list: [{ id: "main" }] },
+        agents: { entries: { main: {} } },
         session: {
           store: database.path,
           maintenance: { coldStorage: { enabled: true, afterDays: 30 } },
@@ -360,6 +360,7 @@ it("identifies a slow transcript matcher while retaining its hot read snapshot",
           isMainThread,
           mode: "deferred",
           operation: "session transcript match read",
+          phases: { beginMs: 0, sqlMs: 1_200, hostAdmissionWaitMs: 0, commitMs: 0 },
           pid: process.pid,
           threadId,
           thresholdMs: 1_000,

@@ -10,10 +10,10 @@ import { runSqliteDeferredTransactionSync } from "../../../infra/sqlite-transact
 import type { DB as OpenClawStateKyselyDatabase } from "../../../state/openclaw-state-db.generated.js";
 import {
   openOpenClawStateDatabase,
-  runOpenClawStateWriteTransaction,
   type OpenClawStateDatabase,
 } from "../../../state/openclaw-state-db.js";
 import {
+  isSettledSubagentRequesterHistory,
   projectSubagentRunForMaintenance,
   projectSubagentRunForSessionList,
 } from "./subagent-delivery-state.js";
@@ -22,16 +22,9 @@ import type {
   SubagentMaintenanceDurableBasis,
   SubagentRunsDurableBasis,
 } from "./subagent-registry-read.types.js";
-import {
-  bindSubagentRunRecord,
-  rowToSubagentRunRecord,
-  type SubagentRunSqliteRow,
-} from "./subagent-registry.store.codec.js";
-import {
-  hasParentStoreColumns,
-  writeSubagentRunValuesInDatabase,
-  type BoundSubagentRunRecord,
-} from "./subagent-registry.store.kernel.js";
+import { rowToSubagentRunRecord } from "./subagent-registry.store.codec.js";
+import { hasParentStoreColumns } from "./subagent-registry.store.kernel.js";
+import { subagentRunRowVersion, type SubagentRunSqliteRow } from "./subagent-registry.store.row.js";
 import type { SubagentRunMaintenanceRecord, SubagentRunRecord } from "./subagent-registry.types.js";
 import { collectSubagentSessionReadKeys } from "./subagent-session-read-scope.js";
 
@@ -64,18 +57,6 @@ export function readSubagentRun(
 ): SubagentRunRecord | null {
   const row = readSubagentRunRow(database, runId);
   return row ? rowToSubagentRunRecord(row) : null;
-}
-
-function writeSubagentRunValues(
-  values: readonly BoundSubagentRunRecord[],
-  deleteRunIds: readonly string[],
-): void {
-  if (values.length === 0 && deleteRunIds.length === 0) {
-    return;
-  }
-  runOpenClawStateWriteTransaction((database) =>
-    writeSubagentRunValuesInDatabase(database, values, deleteRunIds),
-  );
 }
 
 type SubagentRegistryReadScope =
@@ -184,6 +165,7 @@ const subagentSessionListPaths = [
   "delivery.handoffLeaseId",
   "delivery.handoffLeasedAt",
   "delivery.handoffInjectedAt",
+  "childAgentId",
   "requesterAgentId",
   "sessionStartedAt",
   "accumulatedRuntimeMs",
@@ -339,11 +321,20 @@ export function loadSubagentRunsForChildSessionFromSqlite(
   return loadScopedSubagentRuns({ kind: "child", sessionKey: childSessionKey }, database);
 }
 
-export function loadSubagentRunsByRunIdsFromSqlite(
-  runIds: readonly string[],
-  database?: Pick<OpenClawStateDatabase, "db">,
-): SubagentRunRecord[] {
-  return loadScopedSubagentRuns({ kind: "runs", runIds }, database);
+/** Raw versions accompany decoded values, so normalization cannot hide a foreign write. */
+export function loadVersionedSubagentRunsInDatabase(
+  database: Pick<OpenClawStateDatabase, "db">,
+  runIds?: readonly string[],
+): { runs: Map<string, SubagentRunRecord>; versions: Map<string, string | null> } {
+  const versions = new Map<string, string | null>(runIds?.map((runId) => [runId, null]));
+  const runs = decodeSubagentRegistryRows(
+    runIds?.length === 0
+      ? []
+      : readSubagentRegistryRows(runIds ? { kind: "runs", runIds } : undefined, database),
+    (entry) => entry,
+    (row) => versions.set(row.run_id, subagentRunRowVersion(row)),
+  );
+  return { runs, versions };
 }
 
 /** Loads the canonical subagent registry from shared SQLite state. */
@@ -352,26 +343,23 @@ export function loadSubagentRegistryFromSqlite(
 ): Map<string, SubagentRunRecord> {
   // Retired file-era runs are intentionally not recovered here: after SQLite
   // pruning, the file cannot prove whether a run is live or stale. Doctor owns discard.
-  const runs = new Map<string, SubagentRunRecord>();
-  for (const row of readSubagentRegistryRows(undefined, database)) {
-    const entry = rowToSubagentRunRecord(row);
-    if (entry) {
-      runs.set(entry.runId, entry);
-    }
-  }
-  return runs;
+  return decodeSubagentRegistryRows(
+    readSubagentRegistryRows(undefined, database),
+    (entry) => entry,
+  );
 }
 
-function decodeSubagentMaintenanceRows(
+function decodeSubagentRegistryRows<T>(
   rows: Iterable<SubagentRunSqliteRow>,
+  project: (entry: SubagentRunRecord) => T,
   observe?: (row: SubagentRunSqliteRow) => void,
-): Map<string, SubagentRunMaintenanceRecord> {
-  const runs = new Map<string, SubagentRunMaintenanceRecord>();
+): Map<string, T> {
+  const runs = new Map<string, T>();
   for (const row of rows) {
     observe?.(row);
     const entry = rowToSubagentRunRecord(row);
     if (entry) {
-      runs.set(entry.runId, projectSubagentRunForMaintenance(entry));
+      runs.set(entry.runId, project(entry));
     }
   }
   return runs;
@@ -379,8 +367,9 @@ function decodeSubagentMaintenanceRows(
 
 /** Uses the canonical codec without transferring retained prompts and completion results. */
 export function loadSubagentMaintenanceRunsFromSqlite(): Map<string, SubagentRunMaintenanceRecord> {
-  return decodeSubagentMaintenanceRows(
+  return decodeSubagentRegistryRows(
     readSubagentRegistryRows(undefined, undefined, "maintenance"),
+    projectSubagentRunForMaintenance,
   );
 }
 
@@ -390,8 +379,9 @@ export function loadSubagentMaintenanceRunsInDatabase(
 ): { runs: Map<string, SubagentRunMaintenanceRecord>; digest: string } {
   return runSqliteDeferredTransactionSync(database.db, () => {
     const hash = createHash("sha256");
-    const runs = decodeSubagentMaintenanceRows(
+    const runs = decodeSubagentRegistryRows(
       readSubagentRegistryRows(undefined, database, "maintenance"),
+      projectSubagentRunForMaintenance,
       (row) => {
         hash.update(JSON.stringify(row));
       },
@@ -432,14 +422,14 @@ export function loadSubagentSessionListRunsFromSqlite(
 }
 
 /** Select identities and physical records in one snapshot, before codec filtering. */
-function loadSubagentRunsForSessions(
+export function loadSubagentRunsForSessionsInDatabase(
   database: Pick<OpenClawStateDatabase, "db">,
   sessionKeys: readonly string[],
   inMemoryRuns: Iterable<Pick<SubagentRunReadRecord, "childSessionKey" | "requesterSessionKey">>,
-  observe?: (kind: "topology" | "row", row: unknown) => void,
 ) {
+  const hash = createHash("sha256");
   const { db } = database;
-  return runSqliteDeferredTransactionSync(db, () => {
+  const result = runSqliteDeferredTransactionSync(db, () => {
     const stateDb = getNodeSqliteKysely<SubagentRegistryDatabase>(db);
     const identities = executeSqliteQuerySync(
       db,
@@ -468,11 +458,9 @@ function loadSubagentRunsForSessions(
     const runs = new Map<string, SubagentRunRecord>();
     const complete = runIds.length === identities.length;
     // Topology includes malformed payloads and newly attached descendant branches.
-    if (observe) {
-      for (const row of identities) {
-        if (selected.has(row.child_session_key.trim()) || selectedRunIds.has(row.run_id.trim())) {
-          observe("topology", row);
-        }
+    for (const row of identities) {
+      if (selected.has(row.child_session_key.trim()) || selectedRunIds.has(row.run_id.trim())) {
+        hash.update(JSON.stringify(["topology", row]));
       }
     }
     if (runIds.length) {
@@ -484,7 +472,7 @@ function loadSubagentRunsForSessions(
           .orderBy("run_id", "asc"),
       ).rows;
       for (const row of rows) {
-        observe?.("row", row);
+        hash.update(JSON.stringify(["row", row]));
         const entry = rowToSubagentRunRecord(row);
         if (entry) {
           runs.set(entry.runId, entry);
@@ -493,18 +481,7 @@ function loadSubagentRunsForSessions(
     }
     return { sessionKeys: selected, runIds, runs, complete };
   });
-}
-
-export function loadSubagentRunsForSessionsInDatabase(
-  database: Pick<OpenClawStateDatabase, "db">,
-  sessionKeys: readonly string[],
-  inMemoryRuns: Iterable<Pick<SubagentRunReadRecord, "childSessionKey" | "requesterSessionKey">>,
-) {
-  const hash = createHash("sha256");
-  const selected = loadSubagentRunsForSessions(database, sessionKeys, inMemoryRuns, (kind, row) => {
-    hash.update(JSON.stringify([kind, row]));
-  });
-  return { ...selected, digest: hash.digest("hex") };
+  return { ...result, digest: hash.digest("hex") };
 }
 
 export function subagentRunsDurableBasisMatches(
@@ -517,44 +494,26 @@ export function subagentRunsDurableBasisMatches(
   );
 }
 
-/** Persists only named run mutations, deleting names absent from the current registry. */
-export function saveSubagentRegistryChangesToSqlite(
-  runs: Map<string, SubagentRunRecord>,
-  changedRunIds: readonly string[],
-): void {
-  const runIds = [...new Set(changedRunIds.map((runId) => runId.trim()).filter(Boolean))];
-  const values: BoundSubagentRunRecord[] = [];
-  const deleteRunIds: string[] = [];
-  for (const runId of runIds) {
-    const entry = runs.get(runId);
-    if (entry) {
-      values.push(bindSubagentRunRecord(entry));
-    } else {
-      deleteRunIds.push(runId);
-    }
-  }
-  writeSubagentRunValues(values, deleteRunIds);
-}
-
 /** Mutation ownership cannot discard undecodable retained rows as presentation readers do. */
 export function hasSubagentSessionOwnerInDatabase(
   database: Pick<OpenClawStateDatabase, "db">,
   sessionKey: string,
 ): boolean {
-  return (
-    executeSqliteQuerySync(
+  return runSqliteDeferredTransactionSync(database.db, () => {
+    const child = executeSqliteQuerySync(
       database.db,
       getNodeSqliteKysely<SubagentRegistryDatabase>(database.db)
         .selectFrom("subagent_runs")
         .select("run_id")
-        .where((eb) =>
-          eb.or([
-            eb("child_session_key", "=", sessionKey),
-            eb("requester_session_key", "=", sessionKey),
-            eb("controller_session_key", "=", sessionKey),
-          ]),
-        )
+        .where("child_session_key", "=", sessionKey)
         .limit(1),
-    ).rows.length > 0
-  );
+    );
+    if (child.rows.length > 0) {
+      return true;
+    }
+    return readSubagentRegistryRows({ kind: "session", sessionKey }, database).some((row) => {
+      const entry = rowToSubagentRunRecord(row);
+      return !entry || !isSettledSubagentRequesterHistory(entry);
+    });
+  });
 }

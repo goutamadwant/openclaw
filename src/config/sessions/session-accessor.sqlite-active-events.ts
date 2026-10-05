@@ -30,7 +30,6 @@ import {
   type SessionTranscriptMessageEvent,
 } from "./session-accessor.sqlite-projection-read.js";
 import {
-  iterateVisibleMessageRange,
   iterateVisibleMessageMetadata,
   readVisibleMessageRange,
   resolveVisibleMessagePositions,
@@ -96,8 +95,9 @@ export function everySessionTranscriptUserInputFrom(
   scope: SessionTranscriptReadScope,
   idempotencyKey: string,
   accept: (message: unknown) => boolean,
+  preparedProjection?: CurrentTranscriptProjection,
 ): boolean {
-  return withCurrentProjectionSnapshot(scope, (projection) => {
+  const read = (projection: CurrentTranscriptProjection) => {
     const db = getActiveTranscriptKysely(projection.database);
     const fence = resolveSqliteSessionTranscriptReadFence({
       database: projection.database,
@@ -157,21 +157,8 @@ export function everySessionTranscriptUserInputFrom(
       }
     }
     return seen;
-  });
-}
-
-/** Visits messages synchronously inside one active-path read snapshot. */
-export function visitSessionTranscriptMessageEvents(
-  scope: SessionTranscriptReadScope,
-  visit: (entry: SessionTranscriptMessageEvent) => void,
-): void {
-  withCurrentProjectionSnapshot(scope, (projection) => {
-    const visible = resolveVisibleMessagePositions(projection);
-    // Keep cursors inside the snapshot; for-of closes them on visitor or parse failure.
-    for (const entry of iterateVisibleMessageRange(projection, 0, visible.total)) {
-      visit(entry);
-    }
-  });
+  };
+  return preparedProjection ? read(preparedProjection) : withCurrentProjectionSnapshot(scope, read);
 }
 
 /** Read one active identity using the caller's existing admitted snapshot. */

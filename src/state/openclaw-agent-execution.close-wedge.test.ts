@@ -284,6 +284,9 @@ it("surfaces the native cleanup cause while the close still fails, then recovers
       captureOpenClawAgentDatabaseExecution({ agentId: "first", env }),
       captureOpenClawAgentDatabaseExecution({ agentId: "first", env }),
     ];
+    for (const retry of retries) {
+      expect(retry.capturePreparedGenerationClaim()).toBeUndefined();
+    }
     const releases = Atomics.load(new Int32Array(fault.enabled), 1);
     const results = await Promise.allSettled(retries.map((retry) => retry.prepare(source)));
     for (const result of results) {
@@ -306,5 +309,6 @@ it("surfaces the native cleanup cause while the close still fails, then recovers
       scope.execute({ type: "session.entry.read", input: { sessionKey: "recovered" } }),
     ),
   ).toBeUndefined();
+  expect(recovered.capturePreparedGenerationClaim()).toBeDefined();
   await recovered.release();
 });
