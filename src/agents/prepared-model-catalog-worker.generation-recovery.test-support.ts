@@ -49,23 +49,20 @@ export async function expectPublishedOwnerRecoveryAfterGenerationMismatch(
     ...fixture.config,
     agents: {
       ...fixture.config.agents,
-      list: [
-        {
-          id: "main",
-          default: true,
+      entries: {
+        main: {
           agentDir: fixture.agentDir,
           workspace: fixture.workspaceDir,
         },
         ...(!options.sharedAgentDir
-          ? [
-              {
-                id: "healthy",
+          ? {
+              healthy: {
                 agentDir: healthyAgentDir,
                 workspace: healthyWorkspaceDir,
               },
-            ]
-          : []),
-      ],
+            }
+          : {}),
+      },
     },
   } satisfies OpenClawConfig;
   const inputs = [

@@ -51,7 +51,6 @@ import {
 import {
   notifyPreparedModelRuntimePublication,
   reportPreparedModelRuntimeAuthRefreshFailure,
-  resetPreparedModelRuntimePublicationListenersForTest,
 } from "./prepared-model-runtime.publication-events.js";
 import { PreparedModelRuntimePublicationQueue } from "./prepared-model-runtime.publication-queue.js";
 import {
@@ -754,7 +753,6 @@ registerPreparedRuntimeAuthMaterializationPublisher(owners, notifyPreparedModelR
 
 async function resetPreparedModelRuntimeSnapshotsForTest(): Promise<void> {
   await closePreparedModelRuntimeSnapshots();
-  resetPreparedModelRuntimePublicationListenersForTest();
   modelRuntimeBuildTimeoutMs = DEFAULT_MODEL_RUNTIME_BUILD_TIMEOUT_MS;
 }
 
