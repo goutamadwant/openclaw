@@ -48,6 +48,7 @@ import type { PluginSourceInput } from "./plugin-source-verification.js";
 
 type NativeSnapshot = ReturnType<typeof createPluginNativeCaptureRoot>;
 type NativeReceipt = { signature: string; sourceDigest: string };
+// Membership and source paths stay fixed; admission only updates identities and digests.
 const nativeSourceMembers = new WeakMap<PluginNativeNamespaceFact, Map<string, string>>();
 
 function nativeMemberForSource(namespace: PluginNativeNamespaceFact, source: string) {
@@ -60,9 +61,9 @@ function nativeMemberForSource(namespace: PluginNativeNamespaceFact, source: str
   let members = nativeSourceMembers.get(namespace);
   if (!members) {
     members = new Map<string, string>();
-    for (const [key, member] of Object.entries(namespace.members)) {
-      if (!members.has(member.source)) {
-        members.set(member.source, key);
+    for (const [key, { source: memberSource }] of Object.entries(namespace.members)) {
+      if (!members.has(memberSource)) {
+        members.set(memberSource, key);
       }
     }
     nativeSourceMembers.set(namespace, members);
@@ -321,13 +322,10 @@ export function createPluginNativeAdmission(
       retainNativePath(state, path.join(fact.namespace, "content"));
     }
     const used = new Set([...files.values()].map((fact) => fact.namespace));
-    const nativeNamespaces = Object.fromEntries(
-      [...used].map((id) => [id, state.namespaces.get(id)!]),
-    );
     const next = structuredClone({
       ...finalReceipt,
       nativeArtifacts: Object.fromEntries(files),
-      nativeNamespaces,
+      nativeNamespaces: Object.fromEntries([...used].map((id) => [id, state.namespaces.get(id)!])),
     });
     const unchanged = isDeepStrictEqual(state.receipts.get(key), next);
     state.receipts.set(key, next);
@@ -554,8 +552,8 @@ export function createPluginNativeAdmission(
       const found = namespaceFor(resolvedSource);
       let namespace = recovered
         ? state.namespaces.get(recovered.namespace)
-        : (namespaces().find((candidate) =>
-            Object.values(candidate.members).some((member) => member.source === resolvedSource),
+        : (namespaces().find(
+            (candidate) => nativeMemberForSource(candidate, resolvedSource) !== undefined,
           ) ?? found?.[1]);
       let alias = found?.[0] ?? path.dirname(resolvedSource);
       if (!namespace) {

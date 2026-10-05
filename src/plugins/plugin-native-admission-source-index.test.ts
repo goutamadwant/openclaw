@@ -1,12 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
-import { expect, it, vi } from "vitest";
+import { expect, it } from "vitest";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { createPluginCache, retirePluginCache, withPluginCache } from "./plugin-cache.js";
 import { nativeAdmissionStateFor } from "./plugin-native-admission-state.js";
 import { createPluginNativeAdmission } from "./plugin-native-admission.js";
 
-it("indexes native namespace sources once across repeated capture misses", async () => {
+it("bounds native source reads across capture misses and preserves canonical companion paths", async () => {
   await withOpenClawTestState({ label: "native-source-index" }, async (state) => {
     const root = state.path("plugin");
     const capture = state.path("capture");
@@ -17,6 +17,7 @@ it("indexes native namespace sources once across repeated capture misses", async
     const companion = path.join(root, "companion.txt");
     fs.writeFileSync(native, "native fixture");
     fs.writeFileSync(companion, "companion fixture");
+    fs.symlinkSync(companion, path.join(root, "a-companion.txt"));
     const cache = createPluginCache();
     try {
       const admission = withPluginCache(cache, () => {
@@ -37,22 +38,24 @@ it("indexes native namespace sources once across repeated capture misses", async
         path.join(namespace.capturedRoot, "content", "companion.txt"),
       );
 
-      const entries = Object.entries;
-      let memberScans = 0;
-      const spy = vi.spyOn(Object, "entries").mockImplementation((value: object) => {
-        if (value === namespace.members) {
-          memberScans++;
-        }
-        return entries(value);
-      });
-      try {
-        for (let index = 0; index < 3; index++) {
-          expect(admission.resolvePreparedSource(state.path(`other-${index}.js`))).toBeUndefined();
-        }
-        expect(memberScans).toBeLessThanOrEqual(1);
-      } finally {
-        spy.mockRestore();
+      let sourceReads = 0;
+      const members = Object.values(namespace.members);
+      for (const member of members) {
+        const source = member.source;
+        Object.defineProperty(member, "source", {
+          get() {
+            sourceReads++;
+            return source;
+          },
+        });
       }
+      for (let index = 0; index < 3; index++) {
+        expect(admission.resolvePreparedSource(state.path(`other-${index}.js`))).toBeUndefined();
+      }
+      expect(sourceReads).toBeLessThanOrEqual(members.length);
+      expect(admission.resolvePreparedSource(companion)?.path).toBe(
+        path.join(namespace.capturedRoot, "content", "companion.txt"),
+      );
     } finally {
       await retirePluginCache(cache);
     }
