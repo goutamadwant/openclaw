@@ -46,6 +46,10 @@ export function isReadRequest(input: unknown): input is OpenClawStateReadRequest
         isRecord(input.command.input) &&
         typeof input.command.input.channel === "string" &&
         typeof input.command.input.accountId === "string") ||
+      ((input.command.type === "localWorkspace.get" ||
+        input.command.type === "localWorkspace.exists") &&
+        isRecord(input.command.input) &&
+        typeof input.command.input.id === "string") ||
       (input.command.type === "sessionState.pendingNotices" && input.command.input === undefined) ||
       (input.command.type === "sessionState.ambientTargets" &&
         isRecord(input.command.input) &&
@@ -205,8 +209,7 @@ export function isReadRequest(input: unknown): input is OpenClawStateReadRequest
         typeof input.command.childSessionKey === "string") ||
       (input.command.type === "subagents.runs" &&
         isRecord(input.command.scope) &&
-        (input.command.scope.kind === "all" ||
-          input.command.scope.kind === "maintenance" ||
+        (input.command.scope.kind === "maintenance" ||
           (input.command.scope.kind === "session" &&
             typeof input.command.scope.sessionKey === "string") ||
           (input.command.scope.kind === "descendants" &&
@@ -219,6 +222,7 @@ export function isReadRequest(input: unknown): input is OpenClawStateReadRequest
                 typeof link.requesterSessionKey === "string",
             )) ||
           (input.command.scope.kind === "ids" && isStringArray(input.command.scope.runIds)))) ||
+      input.command.type === "subagents.restore" ||
       input.command.type === "exec-approvals.read" ||
       (input.command.type === "skillLibrary.read" &&
         isRecord(input.command.input) &&
@@ -295,8 +299,8 @@ export function isReadRequest(input: unknown): input is OpenClawStateReadRequest
       (input.command.type === "userProfiles.authority.resolve" &&
         typeof input.command.profileId === "string") ||
       (input.command.type === "userProfiles.githubIdentity.cached" &&
-        typeof input.command.accountId === "number" &&
-        typeof input.command.email === "string") ||
+        ((typeof input.command.accountId === "number" && typeof input.command.email === "string") ||
+          typeof input.command.login === "string")) ||
       (input.command.type === "userProfiles.githubAttribution.resolve" &&
         isStringArray(input.command.profileIds)) ||
       (input.command.type === "userProfiles.channelIdentity.resolve" &&
@@ -384,6 +388,8 @@ export function isReadRequest(input: unknown): input is OpenClawStateReadRequest
       isWorkspaceJournalReadCommand(input.command) ||
       input.command.type === "workers.placementRecoveryCandidates" ||
       input.command.type === "workers.placementPreservation" ||
+      (input.command.type === "workers.placementEnvironmentOwner" &&
+        typeof input.command.environmentId === "string") ||
       (input.command.type === "workers.placementPendingResults" &&
         (input.command.sessionId === undefined || typeof input.command.sessionId === "string")) ||
       (input.command.type === "workers.placementProjection" &&
