@@ -339,13 +339,7 @@ export async function createFullModelCatalogAccess(
         providerExpiries,
         hookRows,
       } = await worker.loadCatalog(providerIds, (error) => {
-        if (
-          (providerIds ?? providers).some((provider) =>
-            published.inventory?.providers.has(provider),
-          )
-        ) {
-          attempt.failed(error, providerIds ?? providers, "provider");
-        }
+        attempt.failed(error, providerIds ?? providers, "provider");
         recoverCatalogGeneration(error);
       });
       assertCurrent();
@@ -576,21 +570,26 @@ export async function createFullModelCatalogAccess(
     refreshAuth: (scope: Parameters<typeof worker.loadAuth>[0]) =>
       worker.loadAuth(scope, recoverCatalogGeneration),
   };
-  const recheckNativeLogin = createNativeLoginRecheck(authOwner, eligibleProviders, (auth) => {
-    const inventory = {
-      runtimeModels: new Map(),
-      providers: new Map(),
-      discoveryOrigins: [],
-      ...published.inventory,
-      key: inventoryKey,
-      pluginFingerprint,
-      nativeSource,
-      catalog: { ...(published.inventory?.catalog ?? params.catalogFacts.modelCatalog) },
-    };
-    setCatalogAuth(inventory.catalog, auth);
-    const change = publishCatalog({ ...published, inventory }, "native");
-    notifyPreparedModelCatalogPublication(params.isPublished?.() === false ? undefined : change);
-  });
+  const recheckNativeLogin = createNativeLoginRecheck(
+    authOwner,
+    params,
+    eligibleProviders,
+    (auth) => {
+      const inventory = {
+        runtimeModels: new Map(),
+        providers: new Map(),
+        discoveryOrigins: [],
+        ...published.inventory,
+        key: inventoryKey,
+        pluginFingerprint,
+        nativeSource,
+        catalog: { ...(published.inventory?.catalog ?? params.catalogFacts.modelCatalog) },
+      };
+      setCatalogAuth(inventory.catalog, auth);
+      const change = publishCatalog({ ...published, inventory }, "native");
+      notifyPreparedModelCatalogPublication(params.isPublished?.() === false ? undefined : change);
+    },
+  );
   const refreshExpiredModelCatalog = () => {
     assertCurrent();
     recheckNativeLogin();
@@ -639,11 +638,7 @@ export async function createFullModelCatalogAccess(
       acquireNative &&
       hasNativeCatalog &&
       (!options.changedOnly || !published.nativeCatalogAcquired);
-    const nativeProviders = includeNative
-      ? options.providerIds
-        ? requestedProviders
-        : undefined
-      : [];
+    const nativeProviders = includeNative ? options.providerIds && requestedProviders : [];
     if (!providers.length && !includeNative && !fullRefresh) {
       return published.catalog ?? staticCatalog;
     }
