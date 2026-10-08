@@ -256,11 +256,20 @@ export function getSecretTargetRegistry(params?: {
   sourceTreeRoot?: string;
 }): SecretTargetRegistryEntry[] {
   if (params?.sourceTree) {
-    const plugins = loadBundledPluginManifestRegistry({
+    const manifestRegistry = loadBundledPluginManifestRegistry({
       env: params.env ?? process.env,
       ...(params.sourceTreeRoot ? { bundledRoot: params.sourceTreeRoot } : {}),
-    }).plugins;
-    return buildSecretTargetRegistryFromPlugins(plugins, {
+    });
+    const manifestError = manifestRegistry.diagnostics?.find(
+      (diagnostic) =>
+        diagnostic.level === "error" ||
+        diagnostic.code === "plugin-candidate-blocked" ||
+        diagnostic.code === "plugin-discovery-incomplete",
+    );
+    if (manifestError) {
+      throw new Error(`Unable to load bundled plugin manifests: ${manifestError.message}`);
+    }
+    return buildSecretTargetRegistryFromPlugins(manifestRegistry.plugins, {
       throwOnLoadError: true,
       bindToRecord: true,
     });

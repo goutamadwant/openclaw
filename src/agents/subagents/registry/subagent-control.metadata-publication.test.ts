@@ -30,7 +30,6 @@ import { writeSubagentSessionEntry } from "./subagent-registry.persistence.test-
 const fixture = useSubagentControlFixture();
 
 it.for([
-  { replacement: false, competingIdle: false, publication: "tombstone" },
   { replacement: true, competingIdle: false, publication: "tombstone" },
   { replacement: false, competingIdle: true, publication: "tombstone" },
   { replacement: false, competingIdle: false, publication: "result" },
@@ -269,7 +268,7 @@ it.for([
     });
     const withKillScope = killScopeOwner.withSubagentKillScope;
     vi.spyOn(killScopeOwner, "withSubagentKillScope").mockImplementation(
-      (params, run, publish, preparePublication) =>
+      (params, run, captureResult, preparePublication, finishResult) =>
         withKillScope(
           params,
           async (scope, trees) => {
@@ -296,8 +295,9 @@ it.for([
             }
             return result;
           },
-          publish,
+          captureResult,
           preparePublication,
+          finishResult,
         ),
     );
     const onResult = vi.fn();

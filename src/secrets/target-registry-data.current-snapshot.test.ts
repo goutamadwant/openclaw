@@ -133,6 +133,64 @@ describe("getSecretTargetRegistry metadata reuse", () => {
     expect(matrixIds).toContain("gateway.auth.token");
   });
 
+  it("rejects bundled manifest errors during source docs generation", async () => {
+    metadataMocks.loadBundledPluginManifestRegistry.mockReturnValue({
+      plugins: [],
+      diagnostics: [
+        {
+          level: "error",
+          pluginId: "broken",
+          source: "broken/openclaw.plugin.json",
+          message: "plugin manifest invalid",
+        },
+      ],
+    } as never);
+    const { getSecretTargetRegistry } = await import("./target-registry-data.js");
+
+    expect(() => getSecretTargetRegistry({ sourceTree: true })).toThrow(
+      "Unable to load bundled plugin manifests: plugin manifest invalid",
+    );
+  });
+
+  it("rejects blocked bundled candidates during source docs generation", async () => {
+    metadataMocks.loadBundledPluginManifestRegistry.mockReturnValue({
+      plugins: [],
+      diagnostics: [
+        {
+          level: "warn",
+          code: "plugin-candidate-blocked",
+          pluginId: "broken",
+          source: "broken/openclaw.plugin.json",
+          message: "blocked plugin candidate: source escapes plugin root",
+        },
+      ],
+    } as never);
+    const { getSecretTargetRegistry } = await import("./target-registry-data.js");
+
+    expect(() => getSecretTargetRegistry({ sourceTree: true })).toThrow(
+      "Unable to load bundled plugin manifests: blocked plugin candidate",
+    );
+  });
+
+  it("rejects incomplete bundled discovery during source docs generation", async () => {
+    metadataMocks.loadBundledPluginManifestRegistry.mockReturnValue({
+      plugins: [],
+      diagnostics: [
+        {
+          level: "warn",
+          code: "plugin-discovery-incomplete",
+          source: "extensions",
+          message: "failed to read extensions dir",
+        },
+      ],
+    } as never);
+    const { getSecretTargetRegistry } = await import("./target-registry-data.js");
+
+    expect(() => getSecretTargetRegistry({ sourceTree: true })).toThrow(
+      "Unable to load bundled plugin manifests: failed to read extensions dir",
+    );
+  });
+
   it("excludes installed plugin contracts from source docs generation", async () => {
     const record = writeChannelContract({
       channelId: "installed",
