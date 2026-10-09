@@ -14,6 +14,7 @@ import { PreparedModelRuntimeAuthPublicationOwner } from "./prepared-model-runti
 import {
   advancePreparedModelRuntimeConfig,
   beginPreparedModelRuntimePluginDrain,
+  ensureGatewayPreparedModelRuntimeReady,
   getPreparedModelRuntimeSnapshot,
   loadPublishedGatewayReplyDispatchRuntime,
   prepareModelRuntimeSnapshot,
@@ -66,6 +67,58 @@ describe("prepared model runtime catalog recovery", () => {
       expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(priorBuilds + 1);
     } finally {
       drain.release();
+    }
+  });
+
+  it("does not repeatedly rebuild a persistently mismatched owner", async () => {
+    mocks.configuredAgentIds = ["default"];
+    const config = {};
+    await refreshPreparedModelRuntimeSnapshots(config, { gatewayLifecycle: true });
+    const input = {
+      agentId: "default",
+      config,
+      agentDir: "/tmp/unused-agent",
+      inheritedAuthDir: "/tmp/unused-agent",
+      workspaceDir: "/tmp/unused-workspace",
+    };
+    const initial = getPreparedModelRuntimeSnapshot(input);
+    if (!initial) {
+      throw new Error("default prepared model runtime owner was not published");
+    }
+    const priorBuilds = mocks.ensureOpenClawModelsJson.mock.calls.length;
+
+    await expect(
+      replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch(initial),
+    ).resolves.toBe(true);
+    const recovered = getPreparedModelRuntimeSnapshot(input);
+    expect(recovered).toBeDefined();
+    if (!recovered) {
+      throw new Error("default prepared model runtime owner was not recovered");
+    }
+    await expect(
+      replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch(recovered),
+    ).resolves.toBe(false);
+    expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(priorBuilds + 1);
+    await expect(loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" })).rejects.toThrow(
+      "prepared reply dispatch runtime owner was not published for default",
+    );
+
+    const suppressedOwner = resolvePreparedModelRuntimeOwnerBySnapshot(recovered);
+    expect(suppressedOwner?.catalogRecovery?.error).toBe(suppressedOwner?.refreshError);
+    const retryAfter = suppressedOwner?.catalogRecovery?.retryAfter;
+    expect(retryAfter).toBeTypeOf("number");
+    if (retryAfter === undefined) {
+      throw new Error("suppressed catalog recovery omitted its retry deadline");
+    }
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(retryAfter);
+    try {
+      await ensureGatewayPreparedModelRuntimeReady({ agentId: "default" });
+      await expect(
+        loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" }),
+      ).resolves.toMatchObject({ agentId: "default" });
+      expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(priorBuilds + 1);
+    } finally {
+      nowSpy.mockRestore();
     }
   });
 
@@ -268,7 +321,6 @@ describe("prepared model runtime catalog recovery", () => {
     if (!initialSecondary) {
       throw new Error("secondary prepared model runtime owner was not published");
     }
-
     let signalAuthBuildStarted: (() => void) | undefined;
     const authBuildStarted = new Promise<void>((resolve) => {
       signalAuthBuildStarted = resolve;
@@ -480,6 +532,11 @@ describe("prepared model runtime catalog recovery", () => {
     if (!initialSecondary) {
       throw new Error("secondary prepared model runtime owner was not published");
     }
+    const secondaryOwner = resolvePreparedModelRuntimeOwnerBySnapshot(initialSecondary);
+    expect(secondaryOwner).toBeDefined();
+    if (!secondaryOwner) {
+      throw new Error("secondary prepared model runtime owner was not retained");
+    }
 
     let signalRecoveryBuildStarted: (() => void) | undefined;
     const recoveryBuildStarted = new Promise<void>((resolve) => {
@@ -517,9 +574,11 @@ describe("prepared model runtime catalog recovery", () => {
     releaseRecoveryBuild?.();
 
     await expect(recovery).rejects.toBe(authError);
+    expect(secondaryOwner.catalogRecovery?.error).toBe(authError);
+    await ensureGatewayPreparedModelRuntimeReady({ agentId: "secondary" });
     await expect(
       loadPublishedGatewayReplyDispatchRuntime({ agentId: "secondary" }),
-    ).rejects.toThrow("prepared reply dispatch runtime owner was not published for secondary");
+    ).resolves.toMatchObject({ agentId: "secondary" });
     await expect(
       loadPublishedGatewayReplyDispatchRuntime({ agentId: "tertiary" }),
     ).resolves.toMatchObject({ agentId: "tertiary" });
@@ -638,9 +697,11 @@ describe("prepared model runtime catalog recovery", () => {
       releaseRecoveryBuild?.();
 
       await expect(recovery).rejects.toBe(recoveryError);
+      expect(initialOwner.catalogRecovery?.error).toBe(initialOwner.refreshError);
+      await ensureGatewayPreparedModelRuntimeReady({ agentId: "default" });
       await expect(
         loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" }),
-      ).rejects.toThrow("prepared reply dispatch runtime owner was not published for default");
+      ).resolves.toMatchObject({ agentId: "default" });
       await expect(healthyDispatch).resolves.toMatchObject({ agentId: "secondary" });
       await expect(healthyRuntime).resolves.toMatchObject({ agentId: "secondary" });
     } finally {

@@ -570,6 +570,22 @@ describe("gateway prepared model catalog", () => {
     expect(loadPublishedPreparedModelCatalogOwnerSnapshot).toHaveBeenCalledTimes(2);
   });
 
+  it("surfaces persistent owner supersession after one reacquisition", async () => {
+    const config = ownerConfig();
+    const superseded = new PreparedModelRuntimePublicationSupersededError("superseded");
+    const loadPublishedPreparedModelCatalogOwnerSnapshot = vi.fn(async () => {
+      throw superseded;
+    });
+
+    await expect(
+      loadGatewayModelCatalog({
+        getConfig: () => config,
+        loadPublishedPreparedModelCatalogOwnerSnapshot,
+      }),
+    ).rejects.toBe(superseded);
+    expect(loadPublishedPreparedModelCatalogOwnerSnapshot).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects an ambiguous owner without an authoritative agent identity", async () => {
     const config = {
       agents: {

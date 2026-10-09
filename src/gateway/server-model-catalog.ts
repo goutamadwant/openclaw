@@ -50,6 +50,8 @@ type LoadPreparedGatewayModelCatalogParams = LoadGatewayModelCatalogParams & {
   refreshAuth?: boolean;
 };
 
+const MAX_OWNER_SUPERSESSION_RETRIES = 1;
+
 async function loadGatewayModelCatalogOwnerSnapshot(
   params?: LoadPreparedGatewayModelCatalogParams,
 ): Promise<{
@@ -104,7 +106,7 @@ function projectGatewayModelCatalogSnapshot(
 export async function loadPreparedGatewayModelCatalogSnapshot(
   params?: LoadPreparedGatewayModelCatalogParams,
 ): Promise<PreparedGatewayModelCatalogSnapshot> {
-  for (;;) {
+  for (let attempt = 0; ; attempt += 1) {
     let loaded: Awaited<ReturnType<typeof loadGatewayModelCatalogOwnerSnapshot>>;
     let refreshedAuth: Awaited<ReturnType<typeof loadPreparedModelRuntimeAuth>>;
     try {
@@ -118,7 +120,10 @@ export async function loadPreparedGatewayModelCatalogSnapshot(
           )
         : undefined;
     } catch (error) {
-      if (error instanceof PreparedModelRuntimePublicationSupersededError) {
+      if (
+        error instanceof PreparedModelRuntimePublicationSupersededError &&
+        attempt < MAX_OWNER_SUPERSESSION_RETRIES
+      ) {
         // Supersession invalidates every captured owner fact. Reacquire the whole owner so
         // replacement auth cannot be combined with stale catalog or metadata.
         continue;

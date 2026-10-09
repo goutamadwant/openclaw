@@ -15,6 +15,8 @@ import {
 import { releasePreparedPluginPublication } from "./prepared-model-runtime.plugin-lifetime.js";
 import { notifyPreparedModelRuntimePublication } from "./prepared-model-runtime.publication-events.js";
 
+const CATALOG_GENERATION_RECOVERY_COOLDOWN_MS = 5_000;
+
 type RecoveryDependencies = {
   owners: Map<string, PreparedModelRuntimeOwner>;
   agentBuildCompletions: Map<string, Promise<void>>;
@@ -48,11 +50,30 @@ function wasSnapshotSuperseded(
   return Boolean(replacement?.snapshot && replacement.snapshot !== snapshot);
 }
 
+function invalidateCatalogOwner(
+  owner: PreparedModelRuntimeOwner,
+  dependencies: RecoveryDependencies,
+  staleError: Error,
+): void {
+  owner.generation += 1;
+  retirePreparedModelRuntimeGeneration(owner);
+  owner.needsRefresh = true;
+  owner.refreshError = staleError;
+  owner.pluginGeneration = undefined;
+  releasePreparedPluginPublication(owner);
+  if (owner.input.agentId) {
+    dependencies.removeReplyDispatch(new Set([owner.input.agentId]));
+  }
+  notifyPreparedModelRuntimePublication({ phase: "invalidated" });
+}
+
 export class PreparedModelCatalogGenerationRecoveryOwner {
   #recoveries = new WeakMap<PreparedModelRuntimeOwner, Promise<void>>();
+  #retryAfterByAgentDir = new Map<string, number>();
 
   reset(): void {
     this.#recoveries = new WeakMap();
+    this.#retryAfterByAgentDir.clear();
   }
 
   async replace(
@@ -120,29 +141,36 @@ export class PreparedModelCatalogGenerationRecoveryOwner {
       pendingReplacement = newerReplacement;
     }
 
+    const now = Date.now();
+    const retryAfter = this.#retryAfterByAgentDir.get(owner.input.agentDir) ?? 0;
+    const staleError = new Error(
+      `prepared model runtime catalog generation was invalid for ${owner.input.agentDir}`,
+    );
+    if (retryAfter > now) {
+      invalidateCatalogOwner(owner, dependencies, staleError);
+      owner.catalogRecovery = {
+        error: staleError,
+        scheduledAttempted: false,
+        retryAfter,
+      };
+      return false;
+    }
+    this.#retryAfterByAgentDir.set(
+      owner.input.agentDir,
+      now + CATALOG_GENERATION_RECOVERY_COOLDOWN_MS,
+    );
+
     const replacement = createPreparedModelRuntimeReplacement();
     const isReplacementCurrent = () => dependencies.getPendingReplacement() === replacement;
     dependencies.setPendingReplacement(replacement);
     dependencies.adoptAuthPublication(replacement);
-    const staleError = new Error(
-      `prepared model runtime catalog generation was invalid for ${owner.input.agentDir}`,
-    );
-    owner.generation += 1;
-    retirePreparedModelRuntimeGeneration(owner);
-    owner.needsRefresh = true;
-    owner.refreshError = staleError;
-    owner.pluginGeneration = undefined;
-    releasePreparedPluginPublication(owner);
-    if (owner.input.agentId) {
-      dependencies.removeReplyDispatch(new Set([owner.input.agentId]));
-    }
-    notifyPreparedModelRuntimePublication({ phase: "invalidated" });
+    invalidateCatalogOwner(owner, dependencies, staleError);
 
+    let recoveryError: Error | undefined;
     const recovery = dependencies.enqueuePublication(async () => {
       if (!isReplacementCurrent() || dependencies.owners.get(ownerKey(owner.input)) !== owner) {
         return;
       }
-      let recoveryError: Error | undefined;
       try {
         await publishPreparedModelRuntimeOwnerBatch({
           ownersToPublish: [owner],
@@ -183,6 +211,17 @@ export class PreparedModelCatalogGenerationRecoveryOwner {
       dependencies.setPendingReplacement(undefined);
       dependencies.rejectAuthPublication(replacement, refreshError);
       replacement.resolve();
+      if (
+        dependencies.owners.get(ownerKey(owner.input)) === owner &&
+        owner.needsRefresh &&
+        owner.refreshError === refreshError
+      ) {
+        owner.catalogRecovery = {
+          error: refreshError,
+          scheduledAttempted: false,
+          retryAfter: 0,
+        };
+      }
       notifyPreparedModelRuntimePublication({ phase: "failed", error: refreshError });
       throw refreshError;
     } finally {
