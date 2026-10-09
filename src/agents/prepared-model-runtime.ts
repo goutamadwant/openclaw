@@ -199,8 +199,8 @@ async function closeModelRuntime(error: Error): Promise<void> {
   if (recovery) {
     try {
       (await recovery).reset();
-    } catch (error) {
-      recoveryFailure = error;
+    } catch (recoveryError) {
+      recoveryFailure = recoveryError;
     }
   }
   closingOwners.forEach(releasePreparedPluginPublication);
