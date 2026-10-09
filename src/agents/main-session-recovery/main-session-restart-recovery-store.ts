@@ -192,20 +192,8 @@ export async function recoverStore(params: {
   lifecycleGeneration?: string;
   shouldContinue?: () => boolean;
   gatewayRuntime: GatewayRecoveryRuntime;
-}): Promise<{
-  started: number;
-  settled: number;
-  failed: number;
-  skipped: number;
-  blocked?: number;
-}> {
-  const result: {
-    started: number;
-    settled: number;
-    failed: number;
-    skipped: number;
-    blocked?: number;
-  } = { started: 0, settled: 0, failed: 0, skipped: 0 };
+}): Promise<{ started: number; settled: number; failed: number; skipped: number }> {
+  const result = { started: 0, settled: 0, failed: 0, skipped: 0 };
   const passId = params.passId ?? randomUUID();
   const lifecycleGeneration = params.lifecycleGeneration ?? getAgentEventLifecycleGeneration();
   const hasCurrentProcessOwner = createCurrentProcessOwnerLookup(params);
@@ -248,9 +236,6 @@ export async function recoverStore(params: {
       result.skipped++;
       params.onSkipped?.(reason);
       decision = skippedMainSessionRecoveryDecision(reason);
-      if (decision.decision === "blocked") {
-        result.blocked = (result.blocked ?? 0) + 1;
-      }
     };
     const stopped = () => {
       if (params.shouldContinue?.() !== false) {
@@ -355,14 +340,12 @@ export async function recoverStore(params: {
         });
         if (tombstone === "notice_failed") {
           result.failed++;
-        } else if (tombstone === "tombstoned") {
+        } else {
           skip(
             recoveryView.status === "exhausted"
               ? "exhausted"
               : "message_action_authority_unavailable",
           );
-        } else {
-          skip("state_changed");
         }
         continue;
       }
@@ -534,10 +517,8 @@ export async function recoverStore(params: {
         });
         if (tombstone === "notice_failed") {
           result.failed++;
-        } else if (tombstone === "tombstoned") {
-          skip("delegated_authority_unavailable");
         } else {
-          skip("state_changed");
+          skip("delegated_authority_unavailable");
         }
         continue;
       }

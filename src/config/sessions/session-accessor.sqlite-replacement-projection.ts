@@ -1,3 +1,4 @@
+import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isMainThread } from "node:worker_threads";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
@@ -45,6 +46,11 @@ import type {
   SessionEntryCreateWithTranscriptOptions,
   SessionEntryReplacement,
 } from "./session-accessor.types.js";
+import {
+  captureIncognitoSessionOperation,
+  publishIncognitoSessionEntry,
+  withIncognitoSessionActor,
+} from "./session-incognito-binding.js";
 import { maintenanceLane, projectionLane } from "./session-transcript-worker-resources.js";
 import { withSessionHistoryWorkerDatabase } from "./session-transcript-worker-runtime.js";
 import { MAX_SESSION_ROW_FACTS_KEYS } from "./session-transcript-worker.types.js";
@@ -69,7 +75,6 @@ type ReplacementProjectionOptions = {
   agentId?: string;
   consumePendingReset?: boolean;
   requireWriteSuccess?: boolean;
-  expectedDatabaseIdentity?: string | symbol;
   sessionKeys?: readonly string[];
   includeSessionWindowOwner?: string;
   includeLabelOwners?: string;
@@ -97,21 +102,42 @@ async function applySqliteSessionEntryReplacementProjection<T, TReplacement>(
   params: ReplacementProjectionParams<T, TReplacement>,
   normalize: (replacements: Iterable<TReplacement> | undefined) => SqliteSessionEntryReplacement[],
   creation?: CreationProjection,
+  retainedIncognito?: ReturnType<typeof captureIncognitoSessionOperation>,
 ): Promise<T> {
-  const env = cloneEnvWithPlatformSemantics(params.env ?? process.env);
-  env.OPENCLAW_STATE_DIR = resolveStateDir(env);
   const target = {
     ...(params.agentId ? { agentId: params.agentId } : {}),
     sessionKey: params.activeSessionKey ?? params.sessionKeys?.[0] ?? "",
     storePath: params.storePath,
-    env,
+    env: params.env,
   };
+  const incognito = retainedIncognito ?? captureIncognitoSessionOperation(target);
+  const env = cloneEnvWithPlatformSemantics(
+    params.env ??
+      (incognito
+        ? { OPENCLAW_STATE_DIR: path.resolve(incognito.actor.path, "../../../..") }
+        : process.env),
+  );
+  env.OPENCLAW_STATE_DIR = resolveStateDir(env);
+  target.env = env;
+  if (incognito && !retainedIncognito) {
+    return withIncognitoSessionActor(
+      incognito.actor,
+      () =>
+        applySqliteSessionEntryReplacementProjection(
+          { ...params, env },
+          normalize,
+          creation,
+          incognito,
+        ),
+      incognito.admissionSignal,
+    );
+  }
   const admission =
-    !creation && isMainThread ? resolveSqliteWriteAdmissionScope(target) : undefined;
+    !incognito && !creation && isMainThread ? resolveSqliteWriteAdmissionScope(target) : undefined;
   const scope =
     creation?.scope ??
     admission ??
-    (isMainThread ? await prepareSqliteScope(target) : resolveSqliteScope(target));
+    (isMainThread && !incognito ? await prepareSqliteScope(target) : resolveSqliteScope(target));
   scope.path ??= resolveOpenClawAgentSqlitePath(toDatabaseOptions(scope));
   const preparedWrite = await runPreparedSqliteSessionWrite(
     scope,
@@ -133,54 +159,69 @@ async function applySqliteSessionEntryReplacementProjection<T, TReplacement>(
           ...readSessionEntryReplacementState(database, params),
           databaseIdentity: readOpenClawAgentDatabaseIdentity(database).identity,
         }));
-      const snapshot = useWorker
-        ? await withSessionHistoryWorkerDatabase(
-            databaseOptions,
-            async (owner) => {
-              const read = () =>
-                owner.readExactEntries({
-                  sessionKeys: params.sessionKeys ?? [],
-                  projection: "replacement",
-                  replacementSelection: {
-                    sessionKeys: params.sessionKeys,
-                    includeSessionWindowOwner: params.includeSessionWindowOwner,
-                    includeLabelOwners: params.includeLabelOwners,
-                  },
-                  env: { ...resolved.env },
-                });
-              let result = await read();
-              if (!result.replacement) {
-                await prepareSessionEntryReplacementDatabase(
-                  databaseOptions,
-                  () => {
-                    owner.assertCurrent();
-                    params.assertCommitAllowed?.();
-                  },
-                  params.retainedExecution,
-                );
-                result = await read();
-              }
-              if (!result.replacement) {
-                throw new Error("Session replacement snapshot lost its initialized database");
-              }
-              return result.replacement;
-            },
-            // Label owners can expand a keyed selection beyond the foreground read budget.
-            params.sessionKeys &&
-              params.sessionKeys.length + (params.includeSessionWindowOwner ? 1 : 0) <=
-                MAX_SESSION_ROW_FACTS_KEYS &&
-              params.includeLabelOwners === undefined
-              ? projectionLane
-              : maintenanceLane,
-          )
-        : await readNative();
+      const snapshot = incognito
+        ? {
+            ...(await incognito.actor.sessions.entry(
+              {
+                assertCurrent() {
+                  incognito.authority.assertCurrent();
+                  params.assertCommitAllowed?.();
+                },
+              },
+              {
+                type: "session.entry.replacements.prepare",
+                input: {
+                  sessionKeys: params.sessionKeys,
+                  includeSessionWindowOwner: params.includeSessionWindowOwner,
+                  includeLabelOwners: params.includeLabelOwners,
+                },
+              },
+              incognito.admissionSignal,
+            )),
+            databaseIdentity: incognito.actor.identity.incarnation,
+          }
+        : useWorker
+          ? await withSessionHistoryWorkerDatabase(
+              databaseOptions,
+              async (owner) => {
+                const read = () =>
+                  owner.readExactEntries({
+                    sessionKeys: params.sessionKeys ?? [],
+                    projection: "replacement",
+                    replacementSelection: {
+                      sessionKeys: params.sessionKeys,
+                      includeSessionWindowOwner: params.includeSessionWindowOwner,
+                      includeLabelOwners: params.includeLabelOwners,
+                    },
+                    env: { ...resolved.env },
+                  });
+                let result = await read();
+                if (!result.replacement) {
+                  await prepareSessionEntryReplacementDatabase(
+                    databaseOptions,
+                    () => {
+                      owner.assertCurrent();
+                      params.assertCommitAllowed?.();
+                    },
+                    params.retainedExecution,
+                  );
+                  result = await read();
+                }
+                if (!result.replacement) {
+                  throw new Error("Session replacement snapshot lost its initialized database");
+                }
+                return result.replacement;
+              },
+              // Label owners can expand a keyed selection beyond the foreground read budget.
+              params.sessionKeys &&
+                params.sessionKeys.length + (params.includeSessionWindowOwner ? 1 : 0) <=
+                  MAX_SESSION_ROW_FACTS_KEYS &&
+                params.includeLabelOwners === undefined
+                ? projectionLane
+                : maintenanceLane,
+            )
+          : await readNative();
       const { entries, expectedRows, labelOwnerKeys } = snapshot;
-      if (
-        params.expectedDatabaseIdentity !== undefined &&
-        snapshot.databaseIdentity !== params.expectedDatabaseIdentity
-      ) {
-        throw new Error("Session replacement changed its admitted database identity");
-      }
       const selectedKeys = snapshot.selectedSessionKeys
         ? new Set(snapshot.selectedSessionKeys)
         : undefined;
@@ -260,7 +301,8 @@ async function applySqliteSessionEntryReplacementProjection<T, TReplacement>(
         deletedEntries: deletedOwners,
         commit: async (assertSourceCurrent) => {
           // Native companions and process-held stores retain their synchronous transaction view.
-          const workerCommit = useWorker && !hasPreparedNativeSessionDeletion();
+          const workerCommit =
+            Boolean(incognito) || (useWorker && !hasPreparedNativeSessionDeletion());
           const preparedPreservation =
             params.skipMaintenance === false
               ? await prepareSessionMaintenancePreservation(params.storePath, {
@@ -301,6 +343,52 @@ async function applySqliteSessionEntryReplacementProjection<T, TReplacement>(
               maintenance,
               maintenanceRunBasis: preparedPreservation?.subagentRunBasis,
             };
+            if (incognito) {
+              const actor = incognito.actor;
+              const committed = await actor.sessions.entry(
+                {
+                  assertCurrent() {
+                    incognito.authority.assertCurrent();
+                    assertCurrent();
+                  },
+                },
+                { type: "session.entry.replacements.commit", input },
+                undefined,
+                (result) => {
+                  try {
+                    params.onLifecycleCommitted?.(result.pendingArchiveRecovery);
+                  } finally {
+                    for (const key of new Set([
+                      ...result.previous.keys(),
+                      ...result.current.keys(),
+                    ])) {
+                      publishIncognitoSessionEntry(
+                        actor,
+                        key,
+                        result.previous.get(key),
+                        result.current.get(key),
+                      );
+                    }
+                  }
+                },
+              );
+              let active = true;
+              try {
+                await params.afterCommitted?.(operation.result, {
+                  env,
+                  assertCurrent() {
+                    if (!active) {
+                      throw new Error("Session commit owner is no longer current");
+                    }
+                    incognito.authority.assertCurrent();
+                    assertCurrent();
+                  },
+                });
+              } finally {
+                active = false;
+              }
+              return { maintenancePlans: committed.maintenancePlans, result: operation.result };
+            }
             if (!workerCommit) {
               return await withSqliteSessionDatabase(
                 databaseOptions,
@@ -378,6 +466,7 @@ async function applySqliteSessionEntryReplacementProjection<T, TReplacement>(
     "session.entry-replacements",
     params.withCommit,
     admission ? () => prepareSqliteScope(target) : undefined,
+    incognito ? "worker" : "foreground",
   );
   const committed = preparedWrite.result;
   await finalizeSessionEntryMaintenancePlansAfterWriterReleaseBestEffort(
@@ -428,7 +517,6 @@ export async function applySessionEntryExactReplacements<T>(params: {
   activeSessionKey?: string;
   agentId?: string;
   requireWriteSuccess?: boolean;
-  expectedDatabaseIdentity?: string | symbol;
   sessionKeys?: readonly string[];
   includeSessionWindowOwner?: string;
   skipMaintenance?: boolean;

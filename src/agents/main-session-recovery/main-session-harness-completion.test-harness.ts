@@ -31,7 +31,6 @@ type HarnessRecoveryFixture = {
     settled: number;
     failed: number;
     skipped: number;
-    blocked?: number;
   }) => Promise<void>;
   loadSessionEntry: (scope: Parameters<typeof loadSessionEntry>[0]) => SessionEntry | undefined;
   sendRecoveryNotice: Mock<GatewayRecoveryRuntime["sendRecoveryNotice"]>;
@@ -116,6 +115,9 @@ export function registerHarnessCompletionRecoveryCases(
     "transcript-read-failure",
     "reserved-successor",
     "human-before-recovery",
+    "failed",
+    "timeout",
+    "killed",
   ])(
     "recovers the admitted harness completion after %s execution is interrupted",
     async (phase) => {
@@ -143,7 +145,12 @@ export function registerHarnessCompletionRecoveryCases(
           sourceChannel: "internal",
           sourceSessionKey: taskRunId,
         } as const;
-        const entry = mainSessionEntry({ lifecycleRevision: "revision-1" });
+        const entry = mainSessionEntry({
+          lifecycleRevision: "revision-1",
+          ...(phase === "failed" || phase === "timeout" || phase === "killed"
+            ? { status: phase }
+            : {}),
+        });
         const binding = await captureAdmittedHarnessCompletionForTest({
           agentId: "main",
           sessionKey,
@@ -231,13 +238,7 @@ export function registerHarnessCompletionRecoveryCases(
             : []),
         ]);
         if (phase === "missing-claim") {
-          await expectRecovery({
-            started: 0,
-            settled: 0,
-            failed: 0,
-            skipped: 1,
-            blocked: 1,
-          });
+          await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1 });
           expect(callGateway).not.toHaveBeenCalled();
           expect(loadSessionEntry({ sessionKey, storePath })).toMatchObject({
             abortedLastRun: false,
@@ -362,7 +363,7 @@ export function registerHarnessCompletionRecoveryCases(
           },
         ],
       );
-      await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1, blocked: 1 });
+      await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1 });
       expect(callGateway).not.toHaveBeenCalled();
       expect(loadSessionEntry({ sessionKey, storePath })).toMatchObject({
         abortedLastRun: false,
@@ -401,7 +402,7 @@ export function registerHarnessCompletionRecoveryCases(
         await expectRecovery({ started: 1, settled: 0, failed: 0, skipped: 0 });
         expect(callGateway).toHaveBeenCalledOnce();
       } else {
-        await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1, blocked: 1 });
+        await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1 });
         expect(callGateway).not.toHaveBeenCalled();
         expect(sendRecoveryNotice).not.toHaveBeenCalled();
         expect(loadSessionEntry({ sessionKey, storePath })).toMatchObject({

@@ -82,7 +82,7 @@ describe("terminal completion session reuse", () => {
       const entry = readSessionStoreFast(storePath)[sessionKey];
       expect(result.isNewSession).toBe(false);
       expect(result.abortedLastRun).toBe(true);
-      expect(entry?.status).toBeUndefined();
+      expect(entry?.status).toBe(status);
       expect(entry).toMatchObject({
         sessionId,
         lifecycleRevision: harnessCompletion.lifecycleRevision,

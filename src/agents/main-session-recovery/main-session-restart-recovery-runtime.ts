@@ -41,13 +41,7 @@ import {
   recoverStore,
 } from "./main-session-restart-recovery-store.js";
 
-type RecoveryCounts = {
-  started: number;
-  settled: number;
-  failed: number;
-  skipped: number;
-  blocked?: number;
-};
+type RecoveryCounts = { started: number; settled: number; failed: number; skipped: number };
 
 function prepareRestartRecovery(gatewayRuntime: GatewayRecoveryRuntime, signal?: AbortSignal) {
   return gatewayRuntime.prepareRestartRecovery(signal)?.then((pausedUntilMs) => {
@@ -109,7 +103,7 @@ export async function recoverRestartAbortedMainSessions(params: {
   shouldContinue?: () => boolean;
   gatewayRuntime: GatewayRecoveryRuntime;
 }): Promise<RecoveryCounts> {
-  const result: RecoveryCounts = { started: 0, settled: 0, failed: 0, skipped: 0 };
+  const result = { started: 0, settled: 0, failed: 0, skipped: 0 };
   if (params.shouldContinue?.() === false) {
     return result;
   }
@@ -138,9 +132,6 @@ export async function recoverRestartAbortedMainSessions(params: {
     result.settled += storeResult.settled;
     result.failed += storeResult.failed;
     result.skipped += storeResult.skipped;
-    if (storeResult.blocked) {
-      result.blocked = (result.blocked ?? 0) + storeResult.blocked;
-    }
   }
 
   if (result.started > 0 || result.settled > 0 || result.failed > 0 || result.skipped > 0) {
