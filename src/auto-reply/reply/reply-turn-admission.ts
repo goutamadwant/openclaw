@@ -133,8 +133,14 @@ export async function admitReplyTurn(
       : getPluginRuntimeGatewayRequestScope()?.resolveGatewayContext;
   let expectedSessionId = params.expectedSessionId;
   const lifecycleGeneration = getAgentEventLifecycleGeneration();
-  let recoveryDispatchOutcome: "deferred" | "failed" | undefined;
-  let terminalRecoveryRearmed = false;
+  let recoveryDispatchOutcome:
+    | {
+        kind: "blocked" | "deferred" | "failed";
+        recoveryRunId: string | undefined;
+        recoverySourceRunId: string | undefined;
+        sessionId: string;
+      }
+    | undefined;
   const rotations = createReplyTurnRotationEvidence({
     sessionKey: params.sessionKey,
     expectedActiveOperations: params.expectedActiveOperations,
@@ -383,7 +389,6 @@ export async function admitReplyTurn(
             admission?.release();
             await Promise.all([admission?.released, recoveryDatabaseClaim?.release()]);
             await recoveryPreparation.commit();
-            terminalRecoveryRearmed = true;
             continue;
           }
           const { recoveryOwnerRelease, shouldClaimRecoveryOwner } = recoveryPreparation;
@@ -415,18 +420,32 @@ export async function admitReplyTurn(
             // instead block recovery while this input rejects the old delivery claim.
             admission?.release();
             if (recoveryDispatchOutcome) {
-              if (params.kind === "queued_followup") {
-                return { status: "skipped", reason: "active-run" };
+              const outcomeMatchesClaim =
+                admittedSessionEntry.sessionId === recoveryDispatchOutcome.sessionId &&
+                admittedSessionEntry.restartRecoveryDeliveryRunId ===
+                  recoveryDispatchOutcome.recoveryRunId &&
+                admittedSessionEntry.restartRecoveryDeliverySourceRunId ===
+                  recoveryDispatchOutcome.recoverySourceRunId;
+              if (!outcomeMatchesClaim) {
+                recoveryDispatchOutcome = undefined;
+              } else {
+                if (params.kind === "queued_followup") {
+                  return { status: "skipped", reason: "active-run" };
+                }
+                if (recoveryDispatchOutcome.kind === "failed") {
+                  throw new Error(
+                    `Restart recovery failed: ${params.sessionKey}. See Gateway logs.`,
+                  );
+                }
+                if (recoveryDispatchOutcome.kind === "blocked") {
+                  throw new Error(
+                    `Restart recovery blocked: ${params.sessionKey}. See Gateway logs.`,
+                  );
+                }
+                await waitForRecovery();
+                recoveryDispatchOutcome = undefined;
+                continue;
               }
-              if (recoveryDispatchOutcome === "failed") {
-                throw new Error(`Restart recovery failed: ${params.sessionKey}. See Gateway logs.`);
-              }
-              if (terminalRecoveryRearmed) {
-                return { status: "skipped", reason: "active-run" };
-              }
-              await waitForRecovery();
-              recoveryDispatchOutcome = undefined;
-              continue;
             }
             const { retryRestartAbortedMainSessionRecovery } =
               await import("../../agents/main-session-recovery/main-session-restart-recovery.js");
@@ -443,7 +462,12 @@ export async function admitReplyTurn(
               storePath,
             });
             assertRecoveryOwnerCurrent(recoveryRuntime, "starting");
-            recoveryDispatchOutcome = recovery.failed > 0 ? "failed" : "deferred";
+            recoveryDispatchOutcome = {
+              kind: recovery.failed > 0 ? "failed" : recovery.blocked ? "blocked" : "deferred",
+              recoveryRunId: admittedSessionEntry.restartRecoveryDeliveryRunId,
+              recoverySourceRunId: admittedSessionEntry.restartRecoveryDeliverySourceRunId,
+              sessionId: admittedSessionEntry.sessionId,
+            };
             // Recovery may have completed or another owner may have won. Reload
             // the exact session and its live owner instead of using this snapshot.
             continue;

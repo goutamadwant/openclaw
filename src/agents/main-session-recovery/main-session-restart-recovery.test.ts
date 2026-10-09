@@ -194,7 +194,7 @@ const scheduleRestartAbortedMainSessionRecovery = (
   });
 
 async function expectRecovery(
-  expected: { started: number; settled: number; failed: number; skipped: number },
+  expected: Awaited<ReturnType<typeof recoverRestartAbortedMainSessions>>,
   cfg?: Parameters<typeof recoverRestartAbortedMainSessions>[0]["cfg"],
 ): Promise<void> {
   const params = cfg === undefined ? { stateDir: tmpDir } : { cfg, stateDir: tmpDir };
@@ -3346,7 +3346,7 @@ describe("main-session-restart-recovery", () => {
       restartRecoveryDeliveryContext: discordDeliveryContext,
     });
 
-    await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1 });
+    await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1, blocked: 1 });
     expect(sendRecoveryNotice).toHaveBeenCalledWith(
       expect.objectContaining({
         text: expect.stringContaining("Resume in new session"),
@@ -3390,7 +3390,7 @@ describe("main-session-restart-recovery", () => {
       },
     );
 
-    await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1 });
+    await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1, blocked: 1 });
 
     const entry = readEntry();
     expect(entry).toMatchObject({
@@ -3434,7 +3434,7 @@ describe("main-session-restart-recovery", () => {
       reason: "session metadata changed",
     });
 
-    await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1 });
+    await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1, blocked: 1 });
 
     expect(transcriptMocks.appendAssistantMessageToSessionTranscript).toHaveBeenCalledTimes(2);
     expect(readEntry()).toMatchObject({
@@ -3497,7 +3497,7 @@ describe("main-session-restart-recovery", () => {
       { role: "user", content: "recover only with delivery authority" },
     ]);
 
-    await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1 });
+    await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1, blocked: 1 });
     expect(sendRecoveryNotice).toHaveBeenCalledOnce();
     expect(sendRecoveryNotice).toHaveBeenCalledWith({
       accountId: "work",
@@ -3531,7 +3531,7 @@ describe("main-session-restart-recovery", () => {
       { role: "user", content: "do not inherit a fallback route" },
     ]);
 
-    await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1 });
+    await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1, blocked: 1 });
     expect(callGateway).not.toHaveBeenCalled();
     const events = await loadTranscriptEvents({
       agentId: "main",
