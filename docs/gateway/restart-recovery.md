@@ -85,6 +85,14 @@ or still-valid admitted input keeps recovery pending. Native parent rotation mus
 the current connection and requester identity checks. A later parent registration cannot
 supply missing historical ownership.
 
+If an admitted completion turn fails, times out, or is interrupted, its complete
+recovery claim stays with the original source. The next visible message or queued
+follow-up resumes that recovery before taking foreground ownership or entering
+the active transcript. Session reuse must not attach the old completion to the
+new message. Recovery still checks the admitted input, requester lifecycle,
+delivery receipt, and replay safety; it does not infer delivery from a terminal
+run status.
+
 Before parent completion admission, native Codex pending assignments retain their
 run, child-thread, native-parent, and known native-turn identities in the existing
 parent binding metadata. Accepted follow-ups can also retain their submission

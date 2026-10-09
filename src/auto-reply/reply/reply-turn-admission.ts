@@ -1,5 +1,4 @@
 import { addAbortListener } from "node:events";
-import { MAIN_SESSION_RECOVERY_WORK_ADMISSION_OWNER } from "../../agents/main-session-recovery/main-session-recovery-admission.js";
 import { scheduleMainSessionRecoveryPendingTarget } from "../../agents/main-session-recovery/main-session-recovery-owner-release.js";
 import {
   claimMainSessionRecoveryOwner,
@@ -15,10 +14,6 @@ import {
   SESSION_RESTART_RECOVERY_TOMBSTONE_ERROR_CODE,
   SessionRestartRecoveryTombstoneError,
 } from "../../config/sessions/lifecycle.js";
-import {
-  hasMainSessionRecoveryClaim,
-  isMainRestartRecoveryCandidate,
-} from "../../config/sessions/restart-recovery-state.js";
 import type { SessionAdmissionDatabaseClaim } from "../../config/sessions/session-accessor.sqlite-entry-admission.js";
 import { loadSessionEntryForAdmission } from "../../config/sessions/session-accessor.sqlite-entry.js";
 import { normalizeStoreSessionKey } from "../../config/sessions/store-entry.js";
@@ -35,10 +30,7 @@ import {
   withPluginRuntimeGatewayContextResolver,
 } from "../../plugins/runtime/gateway-request-scope.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
-import {
-  beginSessionWorkAdmission,
-  getSessionWorkAdmissionOwnerRelease,
-} from "../../sessions/session-lifecycle-admission.js";
+import { beginSessionWorkAdmission } from "../../sessions/session-lifecycle-admission.js";
 import { getAsyncWorkSignal } from "../../shared/async-work-scope.js";
 import {
   createReplyOperation,
@@ -64,6 +56,7 @@ import {
   resolveVisibleActiveWaitMs,
 } from "./reply-run-registry.state.js";
 import { REPLY_WORK_ADMISSION_OWNER } from "./reply-turn-admission-owner.js";
+import { prepareReplyRecoveryAdmission } from "./reply-turn-admission.recovery.js";
 import type { ReplyTurnAdmission, ReplyTurnAdmissionParams } from "./reply-turn-admission.types.js";
 import { bindReplyOperationDatabaseAdmission } from "./reply-turn-database-admission.js";
 import { waitForRestartRecoveryProgress } from "./reply-turn-recovery-wait.js";
@@ -141,6 +134,7 @@ export async function admitReplyTurn(
   let expectedSessionId = params.expectedSessionId;
   const lifecycleGeneration = getAgentEventLifecycleGeneration();
   let recoveryDispatchOutcome: "deferred" | "failed" | undefined;
+  let terminalRecoveryRearmed = false;
   const rotations = createReplyTurnRotationEvidence({
     sessionKey: params.sessionKey,
     expectedActiveOperations: params.expectedActiveOperations,
@@ -365,30 +359,34 @@ export async function admitReplyTurn(
           if (isReplyRunSuccessorAdmissionBlocked(params.sessionKey)) {
             throw new ReplyRunSuccessorAdmissionBlockedError(params.sessionKey);
           }
-          const mayWaitForRecoveryOwner =
-            storePath && !params.resetTriggered && params.allowRestartTombstoneParentFork !== true;
-          // The named admission is the authoritative process-local busy fact even
-          // after startup recovery has cleared the durable aborted marker.
-          const recoveryOwnerRelease = mayWaitForRecoveryOwner
-            ? getSessionWorkAdmissionOwnerRelease({
-                scope: storePath,
-                identities: [params.sessionKey, sessionId],
-                owner: MAIN_SESSION_RECOVERY_WORK_ADMISSION_OWNER,
-              })
-            : undefined;
-          const shouldClaimRecoveryOwner =
-            mayWaitForRecoveryOwner &&
-            admittedSessionEntry &&
-            ((hasMainSessionRecoveryClaim(admittedSessionEntry) &&
-              admittedSessionEntry.abortedLastRun === true) ||
-              (params.kind !== "heartbeat" &&
-                admittedSessionEntry.restartRecoveryRuns !== undefined &&
-                (admittedSessionEntry.mainRestartRecovery !== undefined ||
-                  !replyRunRegistry.get(params.sessionKey))) ||
-              admittedSessionEntry.mainRestartRecovery?.tombstone !== undefined) &&
-            isMainRestartRecoveryCandidate(admittedSessionEntry, params.sessionKey);
           const gatewayContext = resolveGatewayContext?.();
           const recoveryRuntime = gatewayContext?.recoveryRuntime;
+          const recoveryPreparation = prepareReplyRecoveryAdmission({
+            ...params,
+            entry: admittedSessionEntry,
+            expectedDatabaseIdentity: admittedDatabaseClaim?.identity,
+            sessionId,
+            assertCommitAllowed: () => {
+              params.assertRequestCurrent?.();
+              params.upstreamAbortSignal?.throwIfAborted();
+              assertRecoveryOwnerCurrent(recoveryRuntime, "starting");
+              if (interruptedBeforeOperation) {
+                throw new SessionWorkStartChangedError(
+                  "Session changed before completion recovery.",
+                );
+              }
+            },
+          });
+          if (recoveryPreparation.rearmed) {
+            const recoveryDatabaseClaim = admittedDatabaseClaim;
+            admittedDatabaseClaim = undefined;
+            admission?.release();
+            await Promise.all([admission?.released, recoveryDatabaseClaim?.release()]);
+            await recoveryPreparation.commit();
+            terminalRecoveryRearmed = true;
+            continue;
+          }
+          const { recoveryOwnerRelease, shouldClaimRecoveryOwner } = recoveryPreparation;
           if (
             recoveryOwnerRelease &&
             (params.kind !== "visible" || admittedSessionEntry?.abortedLastRun === true)
@@ -403,6 +401,7 @@ export async function admitReplyTurn(
             continue;
           }
           if (
+            storePath &&
             shouldClaimRecoveryOwner &&
             recoveryOwnerRelease === undefined &&
             admittedSessionEntry?.abortedLastRun === true &&
@@ -421,6 +420,9 @@ export async function admitReplyTurn(
               }
               if (recoveryDispatchOutcome === "failed") {
                 throw new Error(`Restart recovery failed: ${params.sessionKey}. See Gateway logs.`);
+              }
+              if (terminalRecoveryRearmed) {
+                return { status: "skipped", reason: "active-run" };
               }
               await waitForRecovery();
               recoveryDispatchOutcome = undefined;
@@ -446,7 +448,7 @@ export async function admitReplyTurn(
             // the exact session and its live owner instead of using this snapshot.
             continue;
           }
-          if (shouldClaimRecoveryOwner && recoveryOwnerRelease === undefined) {
+          if (storePath && shouldClaimRecoveryOwner && recoveryOwnerRelease === undefined) {
             // A claim can durably clear recovery state. Once it starts, a later
             // preparation change must fail this admission instead of replaying it.
             recoveryClaimStarted = true;

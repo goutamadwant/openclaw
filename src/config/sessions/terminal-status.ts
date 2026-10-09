@@ -9,6 +9,10 @@ export function isRecoverableTerminalSessionStatus(
 
 /** Clears stale terminal lifecycle fields before reusing a recoverable session entry. */
 export function recoverTerminalSessionEntryForVisibleTurn(entry: SessionEntry): SessionEntry {
+  if (entry.restartRecoveryHarnessCompletion) {
+    // A failed completion still owns its source; recover it before a later user turn.
+    return { ...entry, status: undefined, abortedLastRun: true };
+  }
   return {
     ...entry,
     status: undefined,

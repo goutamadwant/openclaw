@@ -69,6 +69,7 @@ type ReplacementProjectionOptions = {
   agentId?: string;
   consumePendingReset?: boolean;
   requireWriteSuccess?: boolean;
+  expectedDatabaseIdentity?: string | symbol;
   sessionKeys?: readonly string[];
   includeSessionWindowOwner?: string;
   includeLabelOwners?: string;
@@ -174,6 +175,12 @@ async function applySqliteSessionEntryReplacementProjection<T, TReplacement>(
           )
         : await readNative();
       const { entries, expectedRows, labelOwnerKeys } = snapshot;
+      if (
+        params.expectedDatabaseIdentity !== undefined &&
+        snapshot.databaseIdentity !== params.expectedDatabaseIdentity
+      ) {
+        throw new Error("Session replacement changed its admitted database identity");
+      }
       const selectedKeys = snapshot.selectedSessionKeys
         ? new Set(snapshot.selectedSessionKeys)
         : undefined;
@@ -421,6 +428,7 @@ export async function applySessionEntryExactReplacements<T>(params: {
   activeSessionKey?: string;
   agentId?: string;
   requireWriteSuccess?: boolean;
+  expectedDatabaseIdentity?: string | symbol;
   sessionKeys?: readonly string[];
   includeSessionWindowOwner?: string;
   skipMaintenance?: boolean;

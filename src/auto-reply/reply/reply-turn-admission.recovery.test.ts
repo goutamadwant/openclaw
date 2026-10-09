@@ -338,20 +338,41 @@ it("keeps new input and followups behind a concurrent recovery winner", async ()
 });
 
 it.each([
-  { kind: "queued_followup", failed: false },
-  { kind: "visible", failed: true },
+  { kind: "queued_followup", failed: false, status: "interrupted", expectedStatus: "interrupted" },
+  { kind: "visible", failed: true, status: "interrupted", expectedStatus: "interrupted" },
+  { kind: "visible", failed: false, status: "failed", expectedStatus: undefined },
+  { kind: "visible", failed: false, status: "timeout", expectedStatus: undefined },
+  { kind: "queued_followup", failed: false, status: "killed", expectedStatus: undefined },
 ] as const)(
-  "settles or defers $kind input according to recovery failure: $failed",
-  async ({ kind, failed }) => {
+  "settles or defers $kind input after $status according to recovery failure: $failed",
+  async ({ kind, failed, status, expectedStatus }) => {
     const f = recoveryFixture({
+      status,
       restartRecoveryDeliveryRunId: "interrupted-claim",
       restartRecoveryDeliverySourceRunId: "interrupted-source",
+      ...(status !== "interrupted"
+        ? {
+            restartRecoverySourceIngress: "internal" as const,
+            restartRecoveryHarnessCompletion: {
+              taskId: "child",
+              taskRunId: "child",
+              taskStatus: "succeeded" as const,
+              sourceRunId: "interrupted-source",
+              requesterSessionKey: sessionKey,
+              requesterAgentId: "main",
+              sessionId,
+            },
+          }
+        : {}),
     });
     const context = createRecoveryGatewayContext();
     const retryEntered = createDeferred();
+    const { status: _status, ...expectedEntry } = f.entry;
     const retry = vi
       .spyOn(restartRecovery, "retryRestartAbortedMainSessionRecovery")
       .mockImplementation(async () => {
+        expect(f.read()).toMatchObject(expectedEntry);
+        expect(f.read()?.status).toBe(expectedStatus);
         retryEntered.resolve();
         return { started: 0, settled: 0, failed: failed ? 1 : 0, skipped: failed ? 0 : 1 };
       });
@@ -364,7 +385,8 @@ it.each([
     ]);
     expect(retry).toHaveBeenCalledOnce();
     await setImmediate();
-    expect(f.read()).toMatchObject(f.entry);
+    expect(f.read()).toMatchObject(expectedEntry);
+    expect(f.read()?.status).toBe(expectedStatus);
     expect(replyRunRegistry.get(sessionKey)).toBeUndefined();
     if (failed) {
       await outcome.settled;
@@ -380,6 +402,50 @@ it.each([
     expect(retry).toHaveBeenCalledOnce();
   },
 );
+
+it("settles a terminal completion once before admitting later visible turns", async () => {
+  const f = recoveryFixture({
+    status: "failed",
+    restartRecoveryDeliveryRunId: "completion-claim",
+    restartRecoveryDeliverySourceRunId: "completion-source",
+    restartRecoverySourceIngress: "internal",
+    restartRecoveryHarnessCompletion: {
+      taskId: "child",
+      taskRunId: "child",
+      taskStatus: "succeeded",
+      sourceRunId: "completion-source",
+      requesterSessionKey: sessionKey,
+      requesterAgentId: "main",
+      sessionId,
+    },
+  });
+  const retry = vi
+    .spyOn(restartRecovery, "retryRestartAbortedMainSessionRecovery")
+    .mockImplementation(async () => {
+      const current = f.read();
+      expect(current?.status).toBeUndefined();
+      await f.write({
+        ...current!,
+        abortedLastRun: false,
+        restartRecoveryDeliveryRunId: undefined,
+        restartRecoveryDeliverySourceRunId: undefined,
+        restartRecoverySourceIngress: undefined,
+        restartRecoveryHarnessCompletion: undefined,
+      });
+      return { started: 1, settled: 1, failed: 0, skipped: 0 };
+    });
+  const context = createRecoveryGatewayContext();
+
+  const first = await f.admit({ resolveGatewayContext: () => context, kind: "visible" });
+  expect(first.status).toBe("owned");
+  complete(first);
+  const second = await f.admit({ resolveGatewayContext: () => context, kind: "visible" });
+  expect(second.status).toBe("owned");
+  complete(second);
+
+  expect(retry).toHaveBeenCalledOnce();
+  expect(f.read()).not.toHaveProperty("restartRecoveryHarnessCompletion");
+});
 
 it.each(["started", "cancelled", "replaced"] as const)(
   "waits for reserved startup recovery before visible input: %s",
