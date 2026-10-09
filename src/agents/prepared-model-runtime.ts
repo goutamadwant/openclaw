@@ -14,7 +14,7 @@ import {
   configuredOwnersAreRequestVisible,
   registerPreparedRuntimeAuthMaterializationPublisher,
 } from "./prepared-model-runtime-materializations.js";
-import { PreparedModelCatalogGenerationRecoveryOwner } from "./prepared-model-runtime.catalog-generation-recovery.js";
+import type { PreparedModelCatalogGenerationRecoveryOwner } from "./prepared-model-runtime.catalog-generation-recovery.js";
 import { createPreparedModelRuntimeCatalogRefresh } from "./prepared-model-runtime.catalog.js";
 import * as configuredRefresh from "./prepared-model-runtime.configured-refresh.js";
 import {
@@ -106,7 +106,23 @@ const publicationQueue = new PreparedModelRuntimePublicationQueue();
 let refreshRequestEpoch = 0;
 let refreshCancellation = new AbortController();
 let pendingModelRuntimeReplacement: PreparedModelRuntimeReplacement | undefined;
-const catalogGenerationRecovery = new PreparedModelCatalogGenerationRecoveryOwner();
+let catalogGenerationRecovery: Promise<PreparedModelCatalogGenerationRecoveryOwner> | undefined;
+function resolveCatalogGenerationRecovery(): Promise<PreparedModelCatalogGenerationRecoveryOwner> {
+  if (catalogGenerationRecovery) {
+    return catalogGenerationRecovery;
+  }
+  const loading = import("./prepared-model-runtime.catalog-generation-recovery.js").then(
+    ({ PreparedModelCatalogGenerationRecoveryOwner }) =>
+      new PreparedModelCatalogGenerationRecoveryOwner(),
+  );
+  catalogGenerationRecovery = loading;
+  void loading.catch(() => {
+    if (catalogGenerationRecovery === loading) {
+      catalogGenerationRecovery = undefined;
+    }
+  });
+  return loading;
+}
 const modelRuntimeDrain = createPreparedModelRuntimePluginDrain(
   () => {
     captureModelRuntimeLifetime();
@@ -176,13 +192,25 @@ async function closeModelRuntime(error: Error): Promise<void> {
     ...agentBuildCompletions.values(),
     ...standaloneActivationTails.values(),
   ]);
-  catalogGenerationRecovery.reset();
+  const recovery = catalogGenerationRecovery;
+  catalogGenerationRecovery = undefined;
+  let recoveryFailure: unknown;
+  if (recovery) {
+    try {
+      (await recovery).reset();
+    } catch (error) {
+      recoveryFailure = error;
+    }
+  }
   closingOwners.forEach(releasePreparedPluginPublication);
   releaseProcessLifetime?.();
   releaseProcessLifetime = undefined;
   const failures = results.flatMap((result) =>
     result.status === "rejected" ? [result.reason] : [],
   );
+  if (recoveryFailure !== undefined) {
+    failures.push(recoveryFailure);
+  }
   if (failures.length) {
     throw new AggregateError(failures, "Prepared model work failed to close");
   }
@@ -449,7 +477,8 @@ export async function replacePreparedModelRuntimeSnapshotAfterCatalogGenerationM
   snapshot: PreparedModelRuntimeSnapshot, identity?: readonly [owner: PreparedModelRuntimeOwner, generation: number],
 ) {
   // oxfmt-ignore
-  return await catalogGenerationRecovery.replace(snapshot, {
+  const recovery = await resolveCatalogGenerationRecovery();
+  return await recovery.replace(snapshot, {
       owners,
       agentBuildCompletions,
       buildTimeoutMs: modelRuntimeBuildTimeoutMs,
