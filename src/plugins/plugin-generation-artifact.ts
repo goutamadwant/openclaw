@@ -2,9 +2,8 @@ import fs from "node:fs";
 import { isBuiltin } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { JitiOptions } from "jiti";
 import { isPathInside } from "../infra/path-guards.js";
-import { createJiti } from "./jiti-factory.js";
+import { createPluginCaptureResolver } from "./plugin-capture-resolution.js";
 import {
   createBudgetedPluginNativeAdmission,
   type PluginGenerationCaptureBudget,
@@ -109,6 +108,7 @@ function createPluginGenerationArtifact(
     return acquired;
   };
   const moduleCaptures = new Map<string, PluginModuleCapture>();
+  const resolution = createPluginCaptureResolver();
   const resolveDependency = sourceFacts.resolveDependency;
   // Callers canonicalize roots; already-captured packages survive removal of their original files.
   const copyPackage = (
@@ -259,7 +259,7 @@ function createPluginGenerationArtifact(
       (name, dependency) => linkDependency(name, dependency, true),
     );
     const scannedDirectories = new Set<string>();
-    const captureFile = (source: string, options?: JitiOptions): void => {
+    const captureFile = (source: string): void => {
       const existingSource = capturedPaths.get(path.resolve(source));
       if (existingSource) {
         assertModuleAvailable(existingSource);
@@ -291,7 +291,7 @@ function createPluginGenerationArtifact(
           scannedDirectories.add(real);
           for (const name of budget.readDirectoryNames(real)) {
             if (isPluginSourceEntry(name)) {
-              captureFile(path.join(source, name), options);
+              captureFile(path.join(source, name));
             }
           }
           scannedDirectories.delete(real);
@@ -309,12 +309,7 @@ function createPluginGenerationArtifact(
         resolveDependency,
         linkDependency,
       );
-      const resolver = createJiti(source, {
-        ...options,
-        fsCache: false,
-        moduleCache: false,
-        tryNative: false,
-      });
+      const resolver = resolution.get(source);
       const captureReference = (
         reference: string,
         kind: "asset" | "import" | "require",
@@ -331,12 +326,11 @@ function createPluginGenerationArtifact(
             ? fileURLToPath(reference)
             : reference;
         const resolve = (specifier: string) => {
-          const resolved = resolver.esmResolve(specifier, {
-            try: true,
-            conditions: conditions
-              ? [...conditions]
-              : ["node", "module-sync", kind === "require" ? "require" : "import"],
-          });
+          const resolved = resolution.resolve(
+            source,
+            specifier,
+            conditions ?? ["node", "module-sync", kind === "require" ? "require" : "import"],
+          );
           if (!resolved?.startsWith("file:")) {
             return resolved;
           }
@@ -383,7 +377,7 @@ function createPluginGenerationArtifact(
               (capturedPaths.has(path.resolve(input)) ||
                 inPackage(boundary, fs.realpathSync(input)))
             ) {
-              captureFile(input, resolver.options);
+              captureFile(input);
               return input;
             }
             if (!isPathInside(resolveDependency(name, source)?.root ?? boundary, input)) {
@@ -416,7 +410,7 @@ function createPluginGenerationArtifact(
             }
           }
           if (!external) {
-            captureFile(input, resolver.options);
+            captureFile(input);
           }
           return input;
         }
@@ -474,7 +468,7 @@ function createPluginGenerationArtifact(
           ) {
             return conditions ? executableCapture.captureExecutableFile(input) : null;
           }
-          captureFile(input, resolver.options);
+          captureFile(input);
           if (module && path.isAbsolute(value)) {
             capturedPaths.set(requested, capturedPaths.get(path.resolve(input))!);
           }
@@ -499,7 +493,7 @@ function createPluginGenerationArtifact(
             sourceFacts.recordModuleLookup(
               source,
               reference,
-              resolver,
+              resolution,
               conditions ?? ["node", "module-sync", kind],
             );
           }
@@ -559,7 +553,7 @@ function createPluginGenerationArtifact(
               packageMap.recordMissingTarget(original);
               return undefined;
             }
-            captureFile(original, resolver.options);
+            captureFile(original);
           } else {
             packageForFile(filename)?.materialize();
           }
@@ -656,7 +650,7 @@ function createPluginGenerationArtifact(
     nativeAdmission.finish(initialReceipt);
     pendingInputs.clear();
     additions.clear();
-    const captures = [moduleCaptures, hardlinkedSources, metadataCapture, packages];
+    const captures = [moduleCaptures, hardlinkedSources, metadataCapture, packages, resolution];
     const clearCaptures = () => captures.forEach((capture) => capture.clear());
     const sourceLookup = createPluginGenerationSourceLookup({
       rootDir,
