@@ -27,7 +27,7 @@ import { createPluginNativeImportPattern } from "./plugin-native-resolution.js";
 import {
   capturePluginPackageMetadata,
   capturePluginDependencies,
-  capturePluginModuleSource,
+  resolvePluginModulePackageRoot,
   createPluginDependencyLookup,
   createPluginDependencyResolver,
   createPluginNativeDependencyScopes,
@@ -70,6 +70,8 @@ function createPluginGenerationArtifact(
   const canonicalRootDir = fs.realpathSync(rootDir);
   const directory = sourceCapture.directory;
   const packages = new Map<string, PluginPackageCapture>();
+  const packageForFile = (filename: string) =>
+    findPluginCapturedPackage(packages, filename, directory)?.owner;
   const capturedPaths = new Map<string, string>();
   const originalSources = new Map<string, string>();
   const hardlinkedSources = new Set<string>();
@@ -126,7 +128,7 @@ function createPluginGenerationArtifact(
   );
   const metadataCapture = createPluginPackageMetadataCapture({
     sourceForCaptured: (filename) => originalSources.get(filename),
-    packageForFile: (filename) => packageForFile(filename),
+    packageForFile,
     isRetainedReference: nativeAdmission.isRetainedReference,
     resolveSource: nativeAdmission.resolvePreparedSource,
   });
@@ -170,7 +172,7 @@ function createPluginGenerationArtifact(
       if (!metadataOnly) {
         existing.materialize(executableEntry ? entry : undefined);
       }
-      return existing.destination;
+      return existing.capturedRoot;
     }
     const packageMap = createPluginPackageMapReferences();
     const packageId = `package-${packages.size}`;
@@ -187,15 +189,16 @@ function createPluginGenerationArtifact(
     sourceAliases[root] = destination;
     receipt.marker(`${packageId}\0`);
     const owner: PluginPackageCapture = {
-      destination,
       capturedRoot: destination,
       sourceRoot: boundary,
       links: new Set<string>(),
       state: "metadata",
       captureTarget(filename) {
         const source = path.join(boundary, path.relative(destination, filename));
+        const capturedTarget = capturedPaths.get(path.resolve(source));
         if (
-          !capturedPaths.has(source) &&
+          (capturedTarget !== filename ||
+            !fs.statSync(filename, { throwIfNoEntry: false })?.isFile()) &&
           !packageMap.hasMissingTarget(source) &&
           fs.statSync(source, { throwIfNoEntry: false })?.isFile() &&
           (isPathInside(boundary, fs.realpathSync(source)) ||
@@ -688,16 +691,33 @@ function createPluginGenerationArtifact(
     return destination;
   };
   const captureExecutableFile = (filename: string): string | undefined =>
-    execute?.(() =>
-      capturePluginModuleSource(filename, (root, source) => copyPackage(root, source, false, true)),
-    );
+    execute?.(() => {
+      const real = fs.realpathSync(filename);
+      if (!fs.statSync(real).isFile()) {
+        return undefined;
+      }
+      copyPackage(resolvePluginModulePackageRoot(real), real, false, true);
+      return real;
+    });
   const captureExecutableFileAtRoot = (filename: string, sourceRoot: string): string | undefined =>
     execute?.(() => {
       copyPackage(sourceRoot, filename, false, true);
       return filename;
     });
-  const packageForFile = (filename: string) =>
-    findPluginCapturedPackage(packages, filename, directory)?.owner;
+  const captureExecutableFilesAtRoot = (
+    filenames: readonly string[],
+    sourceRoot: string,
+  ): readonly string[] | undefined =>
+    execute?.(() => {
+      const owner = packages.get(sourceRoot);
+      if (!owner) {
+        throw new Error("Plugin source root is not captured");
+      }
+      for (const filename of filenames) {
+        owner.captureTarget(path.join(owner.capturedRoot, path.relative(sourceRoot, filename)));
+      }
+      return filenames;
+    });
 
   try {
     const sourceRoot = fs.realpathSync(rootDir);
@@ -767,6 +787,7 @@ function createPluginGenerationArtifact(
         captureAdmitted,
         captureExecutableFile,
         captureExecutableFileAtRoot,
+        captureExecutableFilesAtRoot,
         executable: Boolean(execute),
         packages,
         directory,

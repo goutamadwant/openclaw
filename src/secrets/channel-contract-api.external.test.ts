@@ -257,6 +257,45 @@ describe("external channel secret contract api", () => {
   );
 
   it.runIf(process.platform !== "win32")(
+    "keeps a canonical computed dependency when its symlink alias is captured first",
+    () => {
+      const record = writeExternalChannelPlugin({ pluginId: "custom", channelId: "custom" });
+      const realDir = path.join(record.rootDir, "real");
+      fs.mkdirSync(realDir);
+      const helper = path.join(realDir, "helper.cjs");
+      fs.writeFileSync(helper, channelSecretContractModuleSource("canonical-after-alias"), "utf8");
+      fs.symlinkSync(helper, path.join(record.rootDir, "alias.cjs"), "file");
+      fs.writeFileSync(
+        path.join(record.rootDir, "secret-contract-api.cjs"),
+        `module.exports = require("./" + "real/helper.cjs");\n`,
+        "utf8",
+      );
+
+      const api = loadChannelSecretContractApiForRecord(record as PluginManifestRecord, {
+        throwOnLoadError: true,
+      });
+
+      expect(api?.secretTargetRegistryEntries?.map((entry) => entry.id)).toEqual([
+        "channels.canonical-after-alias.token",
+      ]);
+    },
+  );
+
+  it("rejects a contract module without supported exports in strict mode", () => {
+    const record = writeExternalChannelPlugin({ pluginId: "custom", channelId: "custom" });
+    fs.writeFileSync(
+      path.join(record.rootDir, "secret-contract-api.cjs"),
+      "module.exports = {};\n",
+    );
+
+    expect(() =>
+      loadChannelSecretContractApiForRecord(record as PluginManifestRecord, {
+        throwOnLoadError: true,
+      }),
+    ).toThrow("Channel secret contract for custom has no supported exports");
+  });
+
+  it.runIf(process.platform !== "win32")(
     "ignores unrelated dangling symlinks while capturing computed dependencies",
     () => {
       const record = writeExternalChannelPlugin({ pluginId: "custom", channelId: "custom" });

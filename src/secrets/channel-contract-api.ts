@@ -101,6 +101,7 @@ function captureComputedContractDependencies(
   const directories: Array<{ path: string; ancestors: ReadonlySet<string> }> = [
     { path: rootRealPath, ancestors: new Set() },
   ];
+  const sourceFiles: string[] = [];
   let entryCount = 0;
   while (directories.length > 0) {
     const pending = directories.pop();
@@ -151,12 +152,13 @@ function captureComputedContractDependencies(
         if (relativeSource.startsWith(`..${path.sep}`) || path.isAbsolute(relativeSource)) {
           throw new Error("Channel secret contract dependency is outside the plugin root");
         }
-        artifact.captureResolvedModule(source, rootRealPath);
+        sourceFiles.push(source);
       }
     } finally {
       handle.closeSync();
     }
   }
+  artifact.captureResolvedModules(sourceFiles, rootRealPath);
 }
 
 function loadExternalChannelSecretContractFromRecord(
@@ -241,37 +243,41 @@ function loadExternalChannelSecretContractFromRecord(
         aliasMap,
       })(capturedPath) as BundledChannelSecretContractApi;
     const mod = ephemeral ? withPluginCache(createPluginCache(), loadModule) : loadModule();
-    if (mod.collectRuntimeConfigAssignments || mod.secretTargetRegistryEntries) {
-      if (ephemeral) {
-        ephemeralContract = mod;
-      } else {
-        const previousDispose = source!.disposeModule;
-        source!.disposeModule = () => {
-          const failures: unknown[] = [];
-          try {
-            previousDispose?.();
-          } catch (error) {
-            failures.push(error);
-          }
-          try {
-            artifact?.dispose();
-          } catch (error) {
-            failures.push(error);
-          }
-          if (failures.length === 1) {
-            throw failures[0];
-          }
-          if (failures.length > 1) {
-            throw new AggregateError(failures, "Channel secret contract cleanup failed");
-          }
-        };
-        cache.channelSecretContracts.set(cacheKey, {
-          status: "loaded",
-          exports: mod,
-        });
-        retainArtifact = true;
-        return mod;
-      }
+    const hasSupportedExports = Boolean(
+      mod.collectRuntimeConfigAssignments || mod.secretTargetRegistryEntries,
+    );
+    if (path.basename(contractPath).startsWith("secret-contract-api.") && !hasSupportedExports) {
+      throw new Error(`Channel secret contract for ${record.id} has no supported exports`);
+    }
+    if (hasSupportedExports && ephemeral) {
+      ephemeralContract = mod;
+    } else if (hasSupportedExports) {
+      const previousDispose = source!.disposeModule;
+      source!.disposeModule = () => {
+        const failures: unknown[] = [];
+        try {
+          previousDispose?.();
+        } catch (error) {
+          failures.push(error);
+        }
+        try {
+          artifact?.dispose();
+        } catch (error) {
+          failures.push(error);
+        }
+        if (failures.length === 1) {
+          throw failures[0];
+        }
+        if (failures.length > 1) {
+          throw new AggregateError(failures, "Channel secret contract cleanup failed");
+        }
+      };
+      cache.channelSecretContracts.set(cacheKey, {
+        status: "loaded",
+        exports: mod,
+      });
+      retainArtifact = true;
+      return mod;
     }
   } catch (error) {
     loadError = admitted

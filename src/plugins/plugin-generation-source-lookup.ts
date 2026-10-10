@@ -583,6 +583,7 @@ export function createPluginGenerationModuleLookup({
   captureAdmitted,
   captureExecutableFile,
   captureExecutableFileAtRoot,
+  captureExecutableFilesAtRoot,
   executable,
   packages,
   directory,
@@ -595,12 +596,36 @@ export function createPluginGenerationModuleLookup({
   captureAdmitted: ReturnType<typeof createPluginSourceCapture>["capture"];
   captureExecutableFile: (filename: string) => string | undefined;
   captureExecutableFileAtRoot: (filename: string, sourceRoot: string) => string | undefined;
+  captureExecutableFilesAtRoot: (
+    filenames: readonly string[],
+    sourceRoot: string,
+  ) => readonly string[] | undefined;
   executable: boolean;
   packages: ReadonlyMap<string, PluginPackageCapture>;
   directory: string;
 }) {
   const packageForFile = (filename: string) =>
     findPluginCapturedPackage(packages, filename, directory)?.owner;
+  const captureResolved = (filename: string, sourceRoot?: string): string | undefined => {
+    const known = capturedPaths.get(path.resolve(filename));
+    if (known) {
+      assertModuleAvailable(known);
+      return known;
+    }
+    const captured = findPluginCapturedPackage(packages, filename, directory);
+    // import.meta.url can name a deferred peer through a private dependency link.
+    const original = captured
+      ? path.join(captured.owner.sourceRoot, path.relative(captured.root, filename))
+      : filename;
+    const source = sourceRoot
+      ? captureExecutableFileAtRoot(original, sourceRoot)
+      : captureExecutableFile(original);
+    const target = source ? capturedPaths.get(source) : undefined;
+    if (target) {
+      capturedPaths.set(path.resolve(filename), target);
+    }
+    return target;
+  };
   return {
     boundaryRoot: directory,
     sourceForCaptured: (file: string) => originalSources.get(path.resolve(file)),
@@ -647,26 +672,32 @@ export function createPluginGenerationModuleLookup({
       return result.value ? { ...result.value, additions: result.additions } : undefined;
     },
     captureResolvedModule: (filename: string, sourceRoot?: string) => {
-      const known = capturedPaths.get(path.resolve(filename));
-      if (known) {
-        assertModuleAvailable(known);
-        return known;
-      }
-      return captureAdmitted(() => {
-        const captured = findPluginCapturedPackage(packages, filename, directory);
-        // import.meta.url can name a deferred peer through a private dependency link.
-        const original = captured
-          ? path.join(captured.owner.sourceRoot, path.relative(captured.root, filename))
-          : filename;
-        const source = sourceRoot
-          ? captureExecutableFileAtRoot(original, sourceRoot)
-          : captureExecutableFile(original);
-        const target = source ? capturedPaths.get(source) : undefined;
-        if (target) {
-          capturedPaths.set(path.resolve(filename), target);
-        }
-        return target;
-      }).value;
+      return captureAdmitted(() => captureResolved(filename, sourceRoot)).value;
     },
+    captureResolvedModules: (filenames: readonly string[], sourceRoot?: string) =>
+      captureAdmitted(() => {
+        if (!sourceRoot) {
+          return filenames.map((filename) => captureResolved(filename));
+        }
+        const targets = new Map<string, string | undefined>();
+        const unresolved: string[] = [];
+        for (const filename of filenames) {
+          const known = capturedPaths.get(path.resolve(filename));
+          if (known) {
+            assertModuleAvailable(known);
+            targets.set(filename, known);
+          } else {
+            unresolved.push(filename);
+          }
+        }
+        for (const source of captureExecutableFilesAtRoot(unresolved, sourceRoot) ?? []) {
+          const target = capturedPaths.get(path.resolve(source));
+          if (target) {
+            capturedPaths.set(path.resolve(source), target);
+          }
+          targets.set(source, target);
+        }
+        return filenames.map((filename) => targets.get(filename));
+      }).value,
   };
 }
