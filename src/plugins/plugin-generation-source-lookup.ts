@@ -680,17 +680,7 @@ export function createPluginGenerationModuleLookup({
           return filenames.map((filename) => captureResolved(filename));
         }
         const targets = new Map<string, string | undefined>();
-        const unresolved: string[] = [];
-        for (const filename of filenames) {
-          const known = capturedPaths.get(path.resolve(filename));
-          if (known) {
-            assertModuleAvailable(known);
-            targets.set(filename, known);
-          } else {
-            unresolved.push(filename);
-          }
-        }
-        for (const source of captureExecutableFilesAtRoot(unresolved, sourceRoot) ?? []) {
+        for (const source of captureExecutableFilesAtRoot(filenames, sourceRoot) ?? []) {
           const target = capturedPaths.get(path.resolve(source));
           if (target) {
             capturedPaths.set(path.resolve(source), target);
