@@ -46,6 +46,7 @@ export type PluginRootArtifactCache = {
 
 export type PluginCacheArtifacts = {
   channelSecretContracts: Map<string, ChannelSecretContractCacheEntry>;
+  channelSecretContractDisposers: Map<string, () => void>;
   moduleLoaders: Map<string, PluginModuleLoader>;
   sources: Map<string, PluginSourceCacheRecord>;
   sourceAliases: Map<string, string>;

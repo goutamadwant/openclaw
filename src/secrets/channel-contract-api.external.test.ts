@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PluginManifestRecord } from "../plugins/manifest-registry.js";
 import {
   createPluginCache,
-  getPluginCacheSource,
   resetPluginCache,
   retirePluginCache,
   withPluginCache,
@@ -44,8 +43,10 @@ vi.mock("../plugins/hardlink-policy.js", () => ({
 }));
 
 import {
+  capturedTsconfigIsSafe,
   loadChannelSecretContractApi,
   loadChannelSecretContractApiForRecord,
+  shouldDisableCapturedTsconfig,
 } from "./channel-contract-api.js";
 
 type ChannelSecretContractApi = NonNullable<ReturnType<typeof loadChannelSecretContractApi>>;
@@ -362,6 +363,83 @@ describe("external channel secret contract api", () => {
     ]);
   });
 
+  it("preserves in-root TypeScript path mappings through the captured contract", () => {
+    const record = writeExternalChannelPlugin({ pluginId: "custom", channelId: "custom" });
+    const helperDir = path.join(record.rootDir, "helpers");
+    fs.mkdirSync(helperDir);
+    fs.writeFileSync(
+      path.join(helperDir, "contract.ts"),
+      channelSecretContractModuleSource("mapped"),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(record.rootDir, "tsconfig.json"),
+      JSON.stringify({
+        compilerOptions: {
+          baseUrl: ".",
+          paths: { "@fixture/contract": ["helpers/contract.ts"] },
+        },
+      }),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(record.rootDir, "secret-contract-api.ts"),
+      'import contract from "@fixture/contract"; export default contract;\n',
+      "utf8",
+    );
+    fs.rmSync(path.join(record.rootDir, "secret-contract-api.cjs"));
+    vi.stubEnv("JITI_TSCONFIG_PATHS", "true");
+
+    const api = loadChannelSecretContractApiForRecord(record as PluginManifestRecord, {
+      throwOnLoadError: true,
+    });
+
+    expect(api?.secretTargetRegistryEntries?.map((entry) => entry.id)).toEqual([
+      "channels.mapped.token",
+    ]);
+  });
+
+  it("preserves dotted extensionless tsconfig inheritance inside the captured root", () => {
+    const record = writeExternalChannelPlugin({ pluginId: "custom", channelId: "custom" });
+    const helperDir = path.join(record.rootDir, "helpers");
+    fs.mkdirSync(helperDir);
+    fs.writeFileSync(
+      path.join(helperDir, "contract.ts"),
+      channelSecretContractModuleSource("mapped-parent"),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(record.rootDir, "tsconfig.base.json"),
+      JSON.stringify({
+        compilerOptions: {
+          baseUrl: ".",
+          paths: { "@fixture/contract": ["helpers/contract.ts"] },
+        },
+      }),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(record.rootDir, "tsconfig.json"),
+      JSON.stringify({ extends: "./tsconfig.base" }),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(record.rootDir, "secret-contract-api.ts"),
+      'import contract from "@fixture/contract"; export default contract;\n',
+      "utf8",
+    );
+    fs.rmSync(path.join(record.rootDir, "secret-contract-api.cjs"));
+    vi.stubEnv("JITI_TSCONFIG_PATHS", "true");
+
+    const api = loadChannelSecretContractApiForRecord(record as PluginManifestRecord, {
+      throwOnLoadError: true,
+    });
+
+    expect(api?.secretTargetRegistryEntries?.map((entry) => entry.id)).toEqual([
+      "channels.mapped-parent.token",
+    ]);
+  });
+
   it("does not resolve contract imports through a mutable source tsconfig", () => {
     const record = writeExternalChannelPlugin({ pluginId: "custom", channelId: "custom" });
     const outsideDir = makeTrackedTempDir("openclaw-channel-secret-contract-tsconfig", tempDirs);
@@ -392,20 +470,76 @@ describe("external channel secret contract api", () => {
     expect(fs.existsSync(markerPath)).toBe(false);
   });
 
+  it("validates the captured tsconfig instead of a mutable source config", () => {
+    const capturedRoot = makeTrackedTempDir(
+      "openclaw-channel-secret-contract-captured-tsconfig",
+      tempDirs,
+    );
+    const capturedEntry = path.join(capturedRoot, "secret-contract-api.ts");
+    fs.writeFileSync(capturedEntry, "export default {};\n");
+    fs.writeFileSync(
+      path.join(capturedRoot, "tsconfig.json"),
+      JSON.stringify({ compilerOptions: { paths: { "@escaped": ["/outside.cjs"] } } }),
+    );
+    vi.stubEnv("JITI_TSCONFIG_PATHS", "true");
+
+    expect(shouldDisableCapturedTsconfig(capturedEntry, capturedRoot)).toBe(true);
+  });
+
+  it("does not inherit a tsconfig above the captured root", () => {
+    const parent = makeTrackedTempDir(
+      "openclaw-channel-secret-contract-ambient-tsconfig",
+      tempDirs,
+    );
+    fs.writeFileSync(
+      path.join(parent, "tsconfig.json"),
+      JSON.stringify({ compilerOptions: { paths: { "@escaped": ["/outside.cjs"] } } }),
+    );
+    const capturedRoot = path.join(parent, "captured");
+    fs.mkdirSync(capturedRoot);
+    const capturedEntry = path.join(capturedRoot, "secret-contract-api.ts");
+    fs.writeFileSync(capturedEntry, "export default {};\n");
+    vi.stubEnv("JITI_TSCONFIG_PATHS", "true");
+
+    expect(shouldDisableCapturedTsconfig(capturedEntry, capturedRoot)).toBe(true);
+  });
+
+  it("rejects traversal after a tsconfig path wildcard", () => {
+    const capturedRoot = makeTrackedTempDir(
+      "openclaw-channel-secret-contract-wildcard-tsconfig",
+      tempDirs,
+    );
+    const configPath = path.join(capturedRoot, "tsconfig.json");
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        compilerOptions: {
+          baseUrl: ".",
+          paths: { "@fixture/*": ["helpers/*/../../../outside.cjs"] },
+        },
+      }),
+    );
+
+    expect(capturedTsconfigIsSafe(configPath, fs.realpathSync(capturedRoot))).toBe(false);
+  });
+
   it("disposes captured contracts once when an operation cache retires", async () => {
     const record = writeExternalChannelPlugin({ pluginId: "custom", channelId: "custom" });
     const cache = createPluginCache();
-    const contractPath = path.join(record.rootDir, "secret-contract-api.cjs");
     const dispose = withPluginCache(cache, () => {
       expect(
         loadChannelSecretContractApiForRecord(record as PluginManifestRecord, {
           throwOnLoadError: true,
         }),
       ).toBeDefined();
-      const source = getPluginCacheSource(contractPath);
-      const originalDispose = source.disposeModule;
+      const originalDispose = [...cache.channelSecretContractDisposers.values()][0];
+      expect(originalDispose).toBeDefined();
       const trackedDispose = vi.fn(() => originalDispose?.());
-      source.disposeModule = trackedDispose;
+      const key = [...cache.channelSecretContractDisposers.keys()][0];
+      if (!key) {
+        throw new Error("expected channel contract disposer");
+      }
+      cache.channelSecretContractDisposers.set(key, trackedDispose);
       return trackedDispose;
     });
 
@@ -413,6 +547,27 @@ describe("external channel secret contract api", () => {
     await retirePluginCache(cache);
 
     expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it("ignores updater rollback trees while capturing contract dependencies", () => {
+    const record = writeExternalChannelPlugin({ pluginId: "custom", channelId: "custom" });
+    const rollback = path.join(
+      record.rootDir,
+      "node_modules.openclaw-update-00000000-0000-4000-8000-000000000000.tmp",
+      "previous",
+    );
+    fs.mkdirSync(rollback, { recursive: true });
+    for (let index = 0; index < 1_025; index += 1) {
+      fs.writeFileSync(path.join(rollback, `${index}.js`), "export {};\n");
+    }
+
+    const api = loadChannelSecretContractApiForRecord(record as PluginManifestRecord, {
+      throwOnLoadError: true,
+    });
+
+    expect(api?.secretTargetRegistryEntries?.map((entry) => entry.id)).toEqual([
+      "channels.custom.token",
+    ]);
   });
 
   it("does not retain source-generation loaders or contract artifacts", () => {

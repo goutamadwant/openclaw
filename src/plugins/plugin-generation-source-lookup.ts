@@ -8,6 +8,7 @@ import { hasErrnoCode } from "../infra/errno.js";
 import { createJiti } from "./jiti-factory.js";
 import { isPathInside, relativePluginPathInsideRootSync } from "./path-safety.js";
 import { getPluginCache } from "./plugin-cache.js";
+import type { PluginGenerationCaptureBudget } from "./plugin-generation-capture-budget.js";
 import { PluginSourceRecoveryUnavailableError } from "./plugin-instance-error.js";
 import type { PluginNativeRecovery } from "./plugin-native-admission.js";
 import {
@@ -61,13 +62,6 @@ type PluginGenerationCaptureArguments = [
   dependencyLookupBoundary?: Parameters<typeof createPluginDependencyResolver>[0],
   captureBudget?: PluginGenerationCaptureBudget,
 ];
-export type PluginGenerationCaptureBudget = {
-  maxEntries: number;
-  maxFiles: number;
-  maxBytes: number;
-  maxFileBytes: number;
-  maxTotalBytes: number;
-};
 const sourceCustody = new AsyncLocalStorage<{
   sources: Map<string, SourceCustody>;
   closed: boolean;

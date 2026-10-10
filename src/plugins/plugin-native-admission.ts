@@ -16,6 +16,8 @@ import {
   capturePluginNativeDirectoryAliases,
   capturePluginNativeNamespace,
   finishPluginNativeNamespace,
+  inspectPluginNativeNamespaceSources,
+  trackPluginNativeNamespaceAdmissionLink,
   pluginNativeNamespaceDirectory,
   pluginNativeNamespaceBoundary,
   pluginNativeNamespaceIsCurrent,
@@ -40,7 +42,6 @@ import {
 } from "./plugin-source-capture-directory.js";
 import {
   hashPluginSourceFile,
-  inspectPluginSourceDescriptor,
   isPluginNativeExecutable,
   pluginSourceIdentityChangedOnlyByCtime,
   pluginSourceStatIdentity,
@@ -180,7 +181,7 @@ export function createPluginNativeAdmission(
   outputRoot?: string,
   captureHooks?: {
     onDirectoryEntry?: () => void;
-    onSourceDescriptor?: (source: string, stat: fs.BigIntStats) => void;
+    onSourceDescriptor?: (source: string, stat: fs.BigIntStats, admittedHardlink?: boolean) => void;
   },
 ) {
   recovery?.retain(getPluginCache());
@@ -392,8 +393,10 @@ export function createPluginNativeAdmission(
       ...fact,
       sourceIdentity: pluginSourceStatIdentity(fs.statSync(input, { bigint: true })),
     };
+    const extendAdmissionLinks = trackPluginNativeNamespaceAdmissionLink(member, target);
     if (linkPluginNativeReference(input, target, linked) === "hardlink") {
       hardlinkedTargets.add(target);
+      extendAdmissionLinks();
     } else {
       hardlinkedTargets.delete(target);
     }
@@ -635,14 +638,7 @@ export function createPluginNativeAdmission(
         !createdNamespaces.has(namespace) &&
         !policyValidatedNamespaces.has(namespace)
       ) {
-        for (const member of Object.values(namespace.members)) {
-          if (member.sizeBytes === undefined) {
-            continue;
-          }
-          inspectPluginSourceDescriptor(member.source, path.dirname(member.source), (stat) =>
-            captureHooks.onSourceDescriptor?.(member.source, stat),
-          );
-        }
+        inspectPluginNativeNamespaceSources(namespace, captureHooks.onSourceDescriptor);
         policyValidatedNamespaces.add(namespace);
       }
       const relative = recovered

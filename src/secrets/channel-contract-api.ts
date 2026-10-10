@@ -2,8 +2,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import JSON5 from "json5";
 import { resolveConfigWidePluginManifestRegistry } from "../config/io.plugin-metadata.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { formatErrorMessage } from "../infra/errors.js";
 import { shouldRejectHardlinkedPluginFiles } from "../plugins/hardlink-policy.js";
 import type { PluginManifestRecord } from "../plugins/manifest-registry.js";
 import { pluginCacheExistsSync } from "../plugins/plugin-cache-files.js";
@@ -11,7 +13,6 @@ import {
   createPluginCache,
   getPluginCache,
   getPluginCacheRoot,
-  getPluginCacheSource,
   withPluginCache,
 } from "../plugins/plugin-cache.js";
 import { capturePluginGenerationArtifact } from "../plugins/plugin-generation-artifact.js";
@@ -20,6 +21,7 @@ import {
   getCachedPluginModuleLoader,
 } from "../plugins/plugin-module-loader-cache.js";
 import type { PluginOrigin } from "../plugins/plugin-origin.types.js";
+import { isPluginSourceEntry } from "../plugins/plugin-source-file.js";
 import { loadBundledPluginPublicArtifactModuleFromCandidatesSync } from "../plugins/public-surface-loader.js";
 import { preparePluginLoaderAliases } from "../plugins/sdk-alias.js";
 import { loadOfficialExternalChannelSecretContractApi } from "./official-external-channel-secret-contract.js";
@@ -93,6 +95,121 @@ const CONTRACT_CAPTURE_MAX_FILES = 1_024;
 const CONTRACT_CAPTURE_MAX_BYTES = 32 * 1024 * 1024;
 const CONTRACT_CAPTURE_EXTENSIONS = new Set([...CONTRACT_API_EXTENSIONS, ".json", ".node"]);
 
+type ChannelContractTsconfig = {
+  extends?: unknown;
+  compilerOptions?: { baseUrl?: unknown; paths?: unknown };
+};
+
+function isPathWithinRoot(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return (
+    relative === "" ||
+    (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`))
+  );
+}
+
+function realpathExistingAncestor(candidate: string): string {
+  let current = candidate;
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return current;
+    }
+    current = parent;
+  }
+  return fs.realpathSync(current);
+}
+
+export function capturedTsconfigIsSafe(
+  configPath: string,
+  rootRealPath: string,
+  seen = new Set<string>(),
+): boolean {
+  const configRealPath = fs.realpathSync(configPath);
+  if (!isPathWithinRoot(rootRealPath, configRealPath) || seen.has(configRealPath)) {
+    return false;
+  }
+  seen.add(configRealPath);
+  let config: ChannelContractTsconfig;
+  try {
+    // SAFETY: every consumed tsconfig field is validated below before it affects module loading.
+    config = JSON5.parse(fs.readFileSync(configRealPath, "utf8")) as ChannelContractTsconfig;
+  } catch {
+    return false;
+  }
+  if (config.extends !== undefined) {
+    if (typeof config.extends !== "string" || !config.extends.startsWith(".")) {
+      return false;
+    }
+    const unresolved = path.resolve(path.dirname(configRealPath), config.extends);
+    const parentConfig = fs.existsSync(unresolved) ? unresolved : `${unresolved}.json`;
+    if (!fs.existsSync(parentConfig) || !capturedTsconfigIsSafe(parentConfig, rootRealPath, seen)) {
+      return false;
+    }
+  }
+  const compilerOptions = config.compilerOptions;
+  if (!compilerOptions) {
+    return true;
+  }
+  const baseUrl = compilerOptions.baseUrl ?? ".";
+  if (typeof baseUrl !== "string" || path.isAbsolute(baseUrl)) {
+    return false;
+  }
+  const mappingRoot = path.resolve(path.dirname(configRealPath), baseUrl);
+  if (
+    !isPathWithinRoot(rootRealPath, mappingRoot) ||
+    !isPathWithinRoot(rootRealPath, realpathExistingAncestor(mappingRoot))
+  ) {
+    return false;
+  }
+  if (compilerOptions.paths === undefined) {
+    return true;
+  }
+  if (!compilerOptions.paths || typeof compilerOptions.paths !== "object") {
+    return false;
+  }
+  return Object.values(compilerOptions.paths).every(
+    (targets) =>
+      Array.isArray(targets) &&
+      targets.every((target) => {
+        if (typeof target !== "string" || path.isAbsolute(target)) {
+          return false;
+        }
+        if (target.includes("*")) {
+          return false;
+        }
+        if (target.split(/[\\/]/).includes("..")) {
+          return false;
+        }
+        const resolved = path.resolve(mappingRoot, target);
+        return (
+          isPathWithinRoot(rootRealPath, resolved) &&
+          isPathWithinRoot(rootRealPath, realpathExistingAncestor(resolved))
+        );
+      }),
+  );
+}
+
+export function shouldDisableCapturedTsconfig(capturedPath: string, capturedRoot: string): boolean {
+  const enabled = process.env.JITI_TSCONFIG_PATHS;
+  if (enabled !== "1" && enabled !== "true") {
+    return false;
+  }
+  const rootRealPath = fs.realpathSync(capturedRoot);
+  let directory = path.dirname(fs.realpathSync(capturedPath));
+  while (isPathWithinRoot(rootRealPath, directory)) {
+    const configPath = path.join(directory, "tsconfig.json");
+    if (fs.existsSync(configPath)) {
+      return !capturedTsconfigIsSafe(configPath, rootRealPath);
+    }
+    if (directory === rootRealPath) {
+      break;
+    }
+    directory = path.dirname(directory);
+  }
+  return true;
+}
+
 function captureComputedContractDependencies(
   artifact: ReturnType<typeof capturePluginGenerationArtifact>,
   rootDir: string,
@@ -125,7 +242,7 @@ function captureComputedContractDependencies(
         if (entryCount > CONTRACT_CAPTURE_MAX_ENTRIES) {
           throw new Error("Channel secret contract source tree exceeds the capture entry limit");
         }
-        if (entry.name === ".git" || entry.name === "node_modules") {
+        if (!isPluginSourceEntry(entry.name)) {
           continue;
         }
         const source = path.join(directory, entry.name);
@@ -180,7 +297,6 @@ function loadExternalChannelSecretContractFromRecord(
       env,
     });
   const cache = getPluginCache();
-  const source = ephemeral ? undefined : getPluginCacheSource(contractPath);
   const cacheKey = `${path.resolve(record.rootDir)}\0${path.resolve(contractPath)}\0${rejectHardlinks}`;
   const cached = ephemeral ? undefined : cache.channelSecretContracts.get(cacheKey);
   if (cached) {
@@ -188,7 +304,9 @@ function loadExternalChannelSecretContractFromRecord(
       return cached.exports as BundledChannelSecretContractApi;
     }
     if (cached.error && throwOnLoadError) {
-      throw cached.error;
+      throw cached.error instanceof Error
+        ? cached.error
+        : new Error(formatErrorMessage(cached.error), { cause: cached.error });
     }
     return undefined;
   }
@@ -215,6 +333,7 @@ function loadExternalChannelSecretContractFromRecord(
       },
     );
     const capturedPath = artifact.resolve(contractPath, rejectHardlinks);
+    const capturedRoot = artifact.rootDir;
     captureComputedContractDependencies(artifact, record.rootDir);
     artifact.prepareModule(capturedPath);
     if (rejectHardlinks) {
@@ -237,12 +356,14 @@ function loadExternalChannelSecretContractFromRecord(
       (ephemeral ? createUncachedPluginModuleLoader : getCachedPluginModuleLoader)({
         modulePath: contractPath,
         loaderFilename: capturedPath,
-        disableAutomaticTsconfig: true,
+        disableAutomaticTsconfig: shouldDisableCapturedTsconfig(capturedPath, capturedRoot),
         importerUrl: import.meta.url,
         tryNative: false,
         aliasMap,
-      })(capturedPath) as BundledChannelSecretContractApi;
-    const mod = ephemeral ? withPluginCache(createPluginCache(), loadModule) : loadModule();
+      })(capturedPath);
+    const mod = (
+      ephemeral ? withPluginCache(createPluginCache(), loadModule) : loadModule()
+    ) as BundledChannelSecretContractApi; // SAFETY: only contract-shaped exports are observed below.
     const hasSupportedExports = Boolean(
       mod.collectRuntimeConfigAssignments || mod.secretTargetRegistryEntries,
     );
@@ -252,26 +373,7 @@ function loadExternalChannelSecretContractFromRecord(
     if (hasSupportedExports && ephemeral) {
       ephemeralContract = mod;
     } else if (hasSupportedExports) {
-      const previousDispose = source!.disposeModule;
-      source!.disposeModule = () => {
-        const failures: unknown[] = [];
-        try {
-          previousDispose?.();
-        } catch (error) {
-          failures.push(error);
-        }
-        try {
-          artifact?.dispose();
-        } catch (error) {
-          failures.push(error);
-        }
-        if (failures.length === 1) {
-          throw failures[0];
-        }
-        if (failures.length > 1) {
-          throw new AggregateError(failures, "Channel secret contract cleanup failed");
-        }
-      };
+      cache.channelSecretContractDisposers.set(cacheKey, () => artifact?.dispose());
       cache.channelSecretContracts.set(cacheKey, {
         status: "loaded",
         exports: mod,
@@ -308,7 +410,7 @@ function loadExternalChannelSecretContractFromRecord(
   }
   if (error) {
     if (throwOnLoadError) {
-      throw error;
+      throw error instanceof Error ? error : new Error(formatErrorMessage(error), { cause: error });
     }
     return undefined;
   }

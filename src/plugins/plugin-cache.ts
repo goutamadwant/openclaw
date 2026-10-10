@@ -215,6 +215,7 @@ export function createPluginCache(options: { kind?: PluginCache["kind"] } = {}):
     preparedBundledDiscoveryModes: new Map(),
     dependencyStatus: new WeakMap(),
     channelSecretContracts: new Map(),
+    channelSecretContractDisposers: new Map(),
     moduleLoaders: new Map(),
     sources: new Map(),
     sourceAliases: new Map(),
@@ -379,6 +380,19 @@ function drainPluginModuleDisposers(cache: PluginCache): unknown[] {
   return errors;
 }
 
+function drainChannelSecretContractDisposers(cache: PluginCache): unknown[] {
+  const errors: unknown[] = [];
+  for (const [key, dispose] of cache.channelSecretContractDisposers) {
+    cache.channelSecretContractDisposers.delete(key);
+    try {
+      dispose();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  return errors;
+}
+
 /** Failed loaders retain their real completion under the cache that admitted them. */
 export function retirePluginCacheInstance(
   instance: PluginInstanceResource,
@@ -463,7 +477,7 @@ function beginPluginCacheRetirement(
     } catch (error) {
       preRetirementErrors.push(error);
     }
-    const moduleDisposalErrors = drainPluginModuleDisposers(cache);
+    const contractDisposalErrors = drainChannelSecretContractDisposers(cache);
     const registries = cache.retireRegistryLoads?.();
     const resources = new Set([...cache.setupModules.values(), ...cache.instances]);
     for (const resource of resources) {
@@ -500,7 +514,7 @@ function beginPluginCacheRetirement(
     }
     const unexpected = [
       ...preRetirementErrors,
-      ...moduleDisposalErrors,
+      ...contractDisposalErrors,
       ...(registry.status === "rejected" ? [registry.reason] : []),
       ...outcomes.flatMap((result) => (result.status === "rejected" ? [result.reason] : [])),
     ];

@@ -262,7 +262,7 @@ export function capturePluginNativeNamespace(params: {
   retainedRoot?: string;
   managedRoots?: readonly string[];
   onDirectoryEntry?: () => void;
-  onSourceDescriptor?: (source: string, stat: fs.BigIntStats) => void;
+  onSourceDescriptor?: (source: string, stat: fs.BigIntStats, admittedHardlink?: boolean) => void;
 }) {
   const { sourceDirectory, boundary, capturedRoot, managed, outputRoot, previous } = params;
   const from = previous ? pluginNativeNamespaceDirectory(previous) : sourceDirectory;
@@ -432,6 +432,14 @@ export function capturePluginNativeNamespace(params: {
         if (old) {
           old.capturedIdentity = member.identity;
         }
+        const capturedPath = path.join(directory, relative);
+        const admissionHardlinks = old
+          ? old.admissionHardlinks && linkedSources.has(member.source)
+            ? [...new Set([...old.admissionHardlinks, capturedPath])]
+            : old.admissionHardlinks
+          : linkedSources.has(member.source)
+            ? [member.source, capturedPath]
+            : undefined;
         return [
           relative,
           {
@@ -439,6 +447,7 @@ export function capturePluginNativeNamespace(params: {
             sourceIdentity: old?.sourceIdentity ?? member.identity,
             capturedIdentity: captured.get(relative)!.identity,
             boundaryChecked: old?.boundaryChecked ?? boundaryFiles.has(member.source),
+            ...(admissionHardlinks ? { admissionHardlinks } : {}),
             ...content.get(relative),
           },
         ];
@@ -463,6 +472,55 @@ export function capturePluginNativeNamespace(params: {
     }
   }
   return { fact, changed };
+}
+
+/** Recheck a reused namespace while distinguishing links created by its own admission. */
+export function inspectPluginNativeNamespaceSources(
+  namespace: PluginNativeNamespaceFact,
+  inspect: (source: string, stat: fs.BigIntStats, admittedHardlink: boolean) => void,
+): void {
+  for (const member of Object.values(namespace.members)) {
+    if (member.sizeBytes === undefined) {
+      continue;
+    }
+    inspectPluginSourceDescriptor(member.source, path.dirname(member.source), (stat) =>
+      inspect(member.source, stat, admittedPluginNativeHardlinks(member, stat) !== undefined),
+    );
+  }
+}
+
+function admittedPluginNativeHardlinks(
+  member: PluginNativeNamespaceFact["members"][string],
+  stat: fs.BigIntStats,
+): string[] | undefined {
+  if (!member.admissionHardlinks) {
+    return undefined;
+  }
+  const live = [...new Set(member.admissionHardlinks)].filter((filename) => {
+    const candidate = fs.lstatSync(filename, { bigint: true, throwIfNoEntry: false });
+    return candidate?.isFile() && candidate.dev === stat.dev && candidate.ino === stat.ino;
+  });
+  return BigInt(live.length) === stat.nlink ? live : undefined;
+}
+
+/** Record another admission-owned name only while every existing link remains accounted for. */
+export function trackPluginNativeNamespaceAdmissionLink(
+  member: PluginNativeNamespaceFact["members"][string],
+  target: string,
+): () => void {
+  const before = fs.statSync(member.source, { bigint: true });
+  const admitted = admittedPluginNativeHardlinks(member, before);
+  return () => {
+    const after = fs.statSync(member.source, { bigint: true });
+    if (
+      admitted &&
+      after.dev === before.dev &&
+      after.ino === before.ino &&
+      after.nlink === before.nlink + 1n
+    ) {
+      member.admissionHardlinks = [...admitted, target];
+    }
+  };
 }
 
 /** Fill dormant companion digests after the legacy initial receipt has consumed native bytes. */
