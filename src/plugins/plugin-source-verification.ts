@@ -9,14 +9,24 @@ import {
   pluginSourceStatIdentity,
 } from "./plugin-source-file.js";
 
-export function readPluginSourceDirectory(source: string) {
-  const entries = fs
-    .readdirSync(source, { withFileTypes: true })
-    .filter((entry) => isPluginSourceEntry(entry.name))
-    .toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+export function readPluginSourceDirectory(source: string, onEntry?: () => void) {
+  const entries: fs.Dirent[] = [];
+  const directory = fs.opendirSync(source);
+  try {
+    for (let entry = directory.readSync(); entry; entry = directory.readSync()) {
+      onEntry?.();
+      if (isPluginSourceEntry(entry.name)) {
+        entries.push(entry);
+      }
+    }
+  } finally {
+    directory.closeSync();
+  }
+  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   const content = entries.map((entry) => [
     entry.name,
     entry.isSymbolicLink() ? fs.readlinkSync(path.join(source, entry.name)) : null,
+    entry.isSymbolicLink() ? fs.realpathSync(path.join(source, entry.name)) : null,
   ]);
   return {
     names: entries.map((entry) => entry.name),
@@ -29,19 +39,30 @@ export function readPluginSourceDirectory(source: string) {
 export const pluginSourceInputIdentity = (stat: fs.BigIntStats): string =>
   stat.isDirectory() ? `${stat.dev}:${stat.ino}:${stat.mode}` : pluginSourceStatIdentity(stat);
 
+/** Legacy entry selection depends on file presence and its canonical containment target. */
+export function pluginSourceFileProbe(source: string): string | undefined {
+  return fs.statSync(source, { throwIfNoEntry: false })?.isFile()
+    ? fs.realpathSync(source)
+    : undefined;
+}
+
 export type PluginSourceInput = {
   identity: string;
   contentHash: string;
   sizeBytes: number;
   directory: boolean;
+  directoryEntryLimit?: number;
   boundary: string;
   native?: boolean;
 };
+
+export type PluginCapturedSourceFact = { source: string; input: PluginSourceInput };
 
 export function verifyPluginSourceInputs(
   inputs: ReadonlyMap<string, PluginSourceInput>,
   sources: Iterable<string>,
 ): void {
+  let directoryEntries = 0;
   for (const source of sources) {
     const input = inputs.get(source)!;
     const identity = input.native
@@ -60,7 +81,19 @@ export function verifyPluginSourceInputs(
       fs.realpathSync(source) !== source ||
       identity !== input.identity ||
       (input.directory
-        ? readPluginSourceDirectory(source).contentHash
+        ? readPluginSourceDirectory(
+            source,
+            input.directoryEntryLimit
+              ? (() => {
+                  return () => {
+                    directoryEntries += 1;
+                    if (directoryEntries > input.directoryEntryLimit!) {
+                      throw new Error("Plugin source directory exceeds its verification budget");
+                    }
+                  };
+                })()
+              : undefined,
+          ).contentHash
         : input.native
           ? input.contentHash
           : hashPluginSourceFile(source, input.boundary).contentHash) !== input.contentHash

@@ -248,7 +248,7 @@ describe("getSecretTargetRegistry metadata reuse", () => {
       );
       metadataMocks.resolvePluginMetadataSnapshot.mockReturnValue({ plugins: [record] } as never);
       metadataMocks.loadBundledPluginManifestRegistry.mockReturnValue({
-        plugins: [record],
+        plugins: [{ ...record, origin: "bundled" }],
       } as never);
       const { getSecretTargetRegistry } = await import("./target-registry-data.js");
       expect(

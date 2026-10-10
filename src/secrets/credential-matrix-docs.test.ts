@@ -1,9 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   renderSecretRefCredentialMatrixJson,
   renderSecretRefCredentialSurface,
 } from "./credential-matrix-docs.js";
-import type { SecretRefCredentialMatrixDocument } from "./credential-matrix.js";
+import {
+  buildSecretRefCredentialMatrix,
+  type SecretRefCredentialMatrixDocument,
+} from "./credential-matrix.js";
 
 const SUPPORTED_START = '[//]: # "secretref-supported-list-start"';
 const SUPPORTED_END = '[//]: # "secretref-supported-list-end"';
@@ -72,6 +75,47 @@ describe("SecretRef credential matrix docs", () => {
     expect(renderSecretRefCredentialMatrixJson(matrix)).toBe(
       `${JSON.stringify(matrix, null, 2)}\n`,
     );
+  });
+
+  it("uses locale-independent ordering for generated content", () => {
+    const localeCompare = vi.spyOn(String.prototype, "localeCompare").mockImplementation(() => {
+      throw new Error("locale-dependent comparison is not allowed");
+    });
+    try {
+      const generated = buildSecretRefCredentialMatrix([
+        {
+          id: "channels.cz.token",
+          targetType: "channels.cz.token",
+          configFile: "openclaw.json",
+          pathPattern: "channels.cz.token",
+          secretShape: "secret_input",
+          expectedResolvedValue: "string",
+          includeInPlan: true,
+          includeInConfigure: true,
+          includeInAudit: true,
+        },
+        {
+          id: "channels.ch.token",
+          targetType: "channels.ch.token",
+          configFile: "openclaw.json",
+          pathPattern: "channels.ch.token",
+          secretShape: "secret_input",
+          expectedResolvedValue: "string",
+          includeInPlan: true,
+          includeInConfigure: true,
+          includeInAudit: true,
+        },
+      ]);
+      expect(generated.entries.map((entry) => entry.id)).toEqual([
+        "channels.ch.token",
+        "channels.cz.token",
+      ]);
+      expect(renderSecretRefCredentialSurface(surfaceFixture(), generated)).toContain(
+        "- `channels.ch.token`\n- `channels.cz.token`",
+      );
+    } finally {
+      localeCompare.mockRestore();
+    }
   });
 
   it("replaces marked blocks from matrix metadata and preserves surrounding prose", () => {

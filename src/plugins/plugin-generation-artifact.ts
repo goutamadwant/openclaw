@@ -11,8 +11,13 @@ import {
 } from "./plugin-generation-file-capture.js";
 import { createPluginGenerationReceipt } from "./plugin-generation-receipt.js";
 import {
+  createPluginGenerationCapture,
   createPluginGenerationSourceLookup,
-  createPluginResolvedModuleCapture,
+  createPluginSourceFacts,
+  assertPluginSourceRootCurrent,
+  type PluginSourceCustodyFork,
+  createPluginGenerationModuleLookup,
+  type PluginGenerationCaptureBudget,
 } from "./plugin-generation-source-lookup.js";
 import {
   createPluginNativeAdmission,
@@ -46,26 +51,78 @@ import {
 import { verifyPluginSourceInputs } from "./plugin-source-verification.js";
 
 /** Capture selective entries and whole dependencies without replacing earlier file bytes. */
-export function capturePluginGenerationArtifact(
+export const capturePluginGenerationArtifact = createPluginGenerationCapture(
+  createPluginGenerationArtifact,
+);
+
+function createPluginGenerationArtifact(
   rootDir: string,
   entryFile?: string,
   execute?: <T>(run: () => T) => T,
   moduleSource?: (filename: string) => string,
   nativeRecovery?: PluginNativeRecovery,
   dependencyLookupBoundary?: Parameters<typeof createPluginDependencyResolver>[0],
+  captureBudget?: PluginGenerationCaptureBudget,
+  retained?: PluginSourceCustodyFork,
+  captureForCustody = false,
 ) {
-  const sourceCapture = createPluginSourceCapture(execute);
+  const sourceCapture = retained?.source.sourceCapture ?? createPluginSourceCapture();
+  const canonicalRootDir = fs.realpathSync(rootDir);
   const directory = sourceCapture.directory;
   const packages = new Map<string, PluginPackageCapture>();
   const capturedPaths = new Map<string, string>();
   const originalSources = new Map<string, string>();
   const hardlinkedSources = new Set<string>();
+  let capturedFileCount = 0;
+  let capturedByteCount = 0;
+  let totalCapturedByteCount = 0;
+  let capturedEntryCount = 0;
+  const reserveEntry = () => {
+    capturedEntryCount += 1;
+    if (captureBudget && capturedEntryCount > captureBudget.maxEntries) {
+      throw new Error("Plugin source capture exceeds its entry budget");
+    }
+  };
+  const reserveFile = (source: string, sizeBytes: number) => {
+    totalCapturedByteCount += sizeBytes;
+    if (
+      captureBudget &&
+      (sizeBytes > captureBudget.maxFileBytes ||
+        totalCapturedByteCount > captureBudget.maxTotalBytes)
+    ) {
+      throw new Error("Plugin source capture exceeds its total byte budget");
+    }
+    if (!isPathInside(canonicalRootDir, source)) {
+      return;
+    }
+    capturedFileCount += 1;
+    capturedByteCount += sizeBytes;
+    if (
+      captureBudget &&
+      (capturedFileCount > captureBudget.maxFiles || capturedByteCount > captureBudget.maxBytes)
+    ) {
+      throw new Error("Plugin source capture exceeds its file budget");
+    }
+  };
   const nativeAdmission = createPluginNativeAdmission(
     rootDir,
     directory,
     entryFile,
     nativeRecovery,
     sourceCapture.outputRoot,
+    captureBudget
+      ? {
+          onDirectoryEntry() {
+            reserveEntry();
+          },
+          onSourceDescriptor(source, stat) {
+            reserveFile(source, Number(stat.size));
+            if (stat.nlink > 1n) {
+              hardlinkedSources.add(source);
+            }
+          },
+        }
+      : undefined,
   );
   const metadataCapture = createPluginPackageMetadataCapture({
     sourceForCaptured: (filename) => originalSources.get(filename),
@@ -74,6 +131,12 @@ export function capturePluginGenerationArtifact(
     resolveSource: nativeAdmission.resolvePreparedSource,
   });
   const sourceAliases: Record<string, string> = {};
+  const sourceFacts = createPluginSourceFacts(
+    rootDir,
+    entryFile,
+    dependencyLookupBoundary,
+    captureForCustody,
+  );
   const receipt = createPluginGenerationReceipt(nativeAdmission.prepared);
   const {
     inputs,
@@ -83,12 +146,12 @@ export function capturePluginGenerationArtifact(
     assertModuleAvailable,
   } = sourceCapture;
   const captureAdmitted = <T>(run: () => T) => {
-    const acquired = acquireSources(run);
+    const acquired = execute ? execute(() => acquireSources(run)) : acquireSources(run);
     nativeAdmission.finish(receipt.finish());
     return acquired;
   };
   const moduleCaptures = new Map<string, PluginModuleCapture>();
-  const resolveDependency = createPluginDependencyResolver(dependencyLookupBoundary);
+  const resolveDependency = sourceFacts.resolveDependency;
   // Callers canonicalize roots; already-captured packages survive removal of their original files.
   const copyPackage = (
     root: string,
@@ -179,6 +242,15 @@ export function capturePluginGenerationArtifact(
       deferExternalLinks: Boolean(execute),
       nativeAdmission,
       receipt,
+      retained,
+      sourceFacts: sourceFacts.files,
+      directoryEntryLimit: captureBudget?.maxEntries,
+      onWillReadDirectoryEntry() {
+        reserveEntry();
+      },
+      onWillCaptureFile(source, sizeBytes) {
+        reserveFile(source, sizeBytes);
+      },
       onPackageMetadata(source, target) {
         metadataCapture.record(target, (manifest) => {
           for (const alias of importTargetNames(manifest.imports)) {
@@ -208,7 +280,7 @@ export function capturePluginGenerationArtifact(
           : destination;
       const link = path.join(lookupDirectory, "node_modules", name);
       packages.get(dependency.root)!.links.add(link);
-      if (!fs.existsSync(link)) {
+      if (!fs.lstatSync(link, { throwIfNoEntry: false })) {
         fs.mkdirSync(path.dirname(link), { recursive: true, mode: 0o700 });
         fs.symlinkSync(path.relative(path.dirname(link), captured), link, "junction");
         additions.add(link);
@@ -220,6 +292,7 @@ export function capturePluginGenerationArtifact(
       boundary,
       copy,
       hasSource: (source) => capturedPaths.has(source),
+      recordMissingMetadata: sourceFacts.recordMissingFile,
     });
     const references = new Map<string, Set<string>>();
     const getNativeScope = createPluginNativeDependencyScopes(
@@ -227,6 +300,19 @@ export function capturePluginGenerationArtifact(
       (name, dependency) => linkDependency(name, dependency, true),
     );
     const scannedDirectories = new Set<string>();
+    const readDirectoryNames = (directory: string): string[] => {
+      const names: string[] = [];
+      const handle = fs.opendirSync(directory);
+      try {
+        for (let entry = handle.readSync(); entry; entry = handle.readSync()) {
+          reserveEntry();
+          names.push(entry.name);
+        }
+      } finally {
+        handle.closeSync();
+      }
+      return names.toSorted();
+    };
     const captureFile = (source: string, options?: JitiOptions): void => {
       const existingSource = capturedPaths.get(path.resolve(source));
       if (existingSource) {
@@ -252,11 +338,12 @@ export function capturePluginGenerationArtifact(
           return;
         }
         if (fs.statSync(real).isDirectory()) {
+          sourceFacts.recordDirectory(source);
           if (scannedDirectories.has(real)) {
             throw new Error("Standalone plugin input contains a directory cycle");
           }
           scannedDirectories.add(real);
-          for (const name of fs.readdirSync(real).toSorted()) {
+          for (const name of readDirectoryNames(real)) {
             if (isPluginSourceEntry(name)) {
               captureFile(path.join(source, name), options);
             }
@@ -447,6 +534,9 @@ export function capturePluginGenerationArtifact(
           }
           return input;
         }
+        if (!module) {
+          sourceFacts.recordMissingFile(local);
+        }
         return undefined;
       };
       const observed = new Map<string, string | null | undefined>();
@@ -459,6 +549,14 @@ export function capturePluginGenerationArtifact(
         // Uninspected external references are distinct from observed absent local inputs.
         if (!observed.has(key) || (conditions && execute && observed.get(key) === null)) {
           observed.set(key, captureReference(reference, kind, conditions));
+          if (kind !== "asset" && observed.get(key) !== null) {
+            sourceFacts.recordModuleLookup(
+              source,
+              reference,
+              resolver,
+              conditions ?? ["node", "module-sync", kind],
+            );
+          }
         }
         return observed.get(key) ?? undefined;
       };
@@ -581,6 +679,7 @@ export function capturePluginGenerationArtifact(
         copy,
         nativeAdmission.isRetainedReference,
         nativeAdmission.resolvePreparedSource,
+        sourceFacts.recordFileProbe,
       );
       metadataCapture.setManifest(path.join(destination, "package.json"), manifest ?? null);
     } else {
@@ -592,6 +691,11 @@ export function capturePluginGenerationArtifact(
     execute?.(() =>
       capturePluginModuleSource(filename, (root, source) => copyPackage(root, source, false, true)),
     );
+  const captureExecutableFileAtRoot = (filename: string, sourceRoot: string): string | undefined =>
+    execute?.(() => {
+      copyPackage(sourceRoot, filename, false, true);
+      return filename;
+    });
   const packageForFile = (filename: string) =>
     findPluginCapturedPackage(packages, filename, directory)?.owner;
 
@@ -608,12 +712,7 @@ export function capturePluginGenerationArtifact(
       capturedPaths.set(alias, capturedPaths.get(entry)!);
     }
     const assertSourceCurrent = () => {
-      if (
-        fs.realpathSync(rootDir) !== sourceRoot ||
-        (entryFile && fs.realpathSync(entryFile) !== entry)
-      ) {
-        throw new Error("Plugin source root changed after capture");
-      }
+      assertPluginSourceRootCurrent({ rootDir, sourceRoot, entryFile, entry });
       nativeAdmission.reconcileSourceInputs(inputs);
       verifyPluginSourceInputs(inputs, inputs.keys());
     };
@@ -624,6 +723,16 @@ export function capturePluginGenerationArtifact(
     additions.clear();
     const captures = [moduleCaptures, hardlinkedSources, metadataCapture, packages];
     const clearCaptures = () => captures.forEach((capture) => capture.clear());
+    const sourceLookup = createPluginGenerationSourceLookup({
+      rootDir,
+      sourceRoot,
+      capturedRoot: root,
+      boundaryRoot: directory,
+      capturedPaths,
+      hardlinkedSources,
+      assertModuleAvailable,
+      captureNativeRecovery: () => nativeAdmission.captureRecovery(initialReceipt, sourceAliases),
+    });
     return {
       sourceRoot,
       rootDir: root,
@@ -638,79 +747,38 @@ export function capturePluginGenerationArtifact(
         }
         nativeAdmission.reconcileSourceInputs(inputs);
       },
-      sourceForCaptured: (file: string) => originalSources.get(path.resolve(file)),
-      moduleFacts: (importer: string): Readonly<PluginModuleCapture> | undefined =>
-        moduleCaptures.get(importer),
-      boundaryRoot: directory,
       // The receipt attests the initial snapshot; first-demand inputs extend only its identity ledger.
       sourceDigest: initialReceipt.sourceDigest,
-      ...createPluginGenerationSourceLookup({
-        rootDir,
-        sourceRoot,
-        capturedRoot: root,
-        boundaryRoot: directory,
-        capturedPaths,
-        hardlinkedSources,
-        assertModuleAvailable,
-        captureNativeRecovery: () => nativeAdmission.captureRecovery(initialReceipt, sourceAliases),
-      }),
+      ...sourceLookup,
+      retainSourceCustody: () =>
+        sourceFacts.captureCustody({
+          sourceRoot,
+          entry,
+          sourceDigest: initialReceipt.sourceDigest,
+          capture: sourceLookup.captureRecoverySource,
+        }),
       assertSourceCurrent,
-      moduleRoot: (filename: string) =>
-        originalSources.has(filename) ? packageForFile(filename)?.capturedRoot : undefined,
-      assertModuleAvailable,
-      prepareModule: (filename: string) => {
-        const owner = packageForFile(filename);
-        const source = originalSources.get(filename);
-        const needsEntry =
-          execute && source && /\.[cm]?[jt]sx?$/.test(source) && !moduleCaptures.has(filename);
-        if (!owner || ((owner.state === "entry" || owner.state === "body") && !needsEntry)) {
-          return [];
-        }
-        return captureAdmitted(() => {
-          // Loading another selected module must not capture a standalone workspace.
-          owner.materialize(owner.state === "entry" ? source : undefined);
-          if (needsEntry && owner.state !== "entry") {
-            owner.materialize(source);
-          }
-        }).additions;
-      },
-      prepareDependency: (importer: string, specifier: string) =>
-        captureAdmitted(() => moduleCaptures.get(importer)?.prepareDependency(specifier)).additions,
-      prepareNativeScopes: (importer?: string) => {
-        const scope = importer ? moduleCaptures.get(importer)?.nativeScope : undefined;
-        return scope?.prepareDependencies || metadataCapture.pending
-          ? captureAdmitted(() => metadataCapture.prepare(scope))
-          : undefined;
-      },
-      prepareNativeModule: (importer: string, specifier: string) =>
-        captureAdmitted(() => {
-          const packageMap =
-            moduleCaptures.get(importer)?.prepareDependency(specifier) === "package-map";
-          metadataCapture.prepare();
-          return packageMap;
-        }).value,
-      captureModule: (importer: string, specifier: string, conditions: readonly string[]) => {
-        const result = captureAdmitted(() =>
-          moduleCaptures.get(importer)?.capture(specifier, conditions),
-        );
-        return result.value ? { ...result.value, additions: result.additions } : undefined;
-      },
-      captureResolvedModule: createPluginResolvedModuleCapture({
+      ...createPluginGenerationModuleLookup({
         capturedPaths,
+        originalSources,
+        moduleCaptures,
+        metadataCapture,
         assertModuleAvailable,
         captureAdmitted,
         captureExecutableFile,
+        captureExecutableFileAtRoot,
+        executable: Boolean(execute),
         packages,
         directory,
       }),
       dispose: () => {
-        sourceCapture.dispose();
+        (retained?.source ?? sourceCapture).dispose();
         clearCaptures();
       },
-      disposeAsync: () => sourceCapture.disposeAsync().then(clearCaptures),
+      disposeAsync: () => (retained?.source ?? sourceCapture).disposeAsync().then(clearCaptures),
     };
   } catch (error) {
-    sourceCapture.dispose();
+    (retained?.source ?? sourceCapture).dispose();
     throw error;
   }
 }

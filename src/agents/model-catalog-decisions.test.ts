@@ -3,6 +3,8 @@ import { createDeferred } from "../../test/helpers/promise.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createPluginMetadataSnapshotFixture } from "../plugins/plugin-metadata.test-support.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
+import { connectUserModelAccount } from "../state/user-model-accounts.js";
+import { ensureProfileForEmail } from "../state/user-profiles.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { resolveUsableAgentCredentialModes } from "./agent-auth-credentials.js";
 import { noteCommittedSharedAuthStoreOwnership } from "./auth-profiles/path-resolve.js";
@@ -10,6 +12,7 @@ import {
   clearRuntimeAuthProfileStoreSnapshots,
   setRuntimeAuthProfileStoreSnapshot,
 } from "./auth-profiles/runtime-snapshots.js";
+import * as personalCatalogReads from "./auth-profiles/sqlite-read.js";
 import type { AuthProfileStore } from "./auth-profiles/types.js";
 import { testing as cliBackendsTesting } from "./cli-backends.test-support.js";
 import {
@@ -20,6 +23,7 @@ import {
 } from "./model-auth-availability.test-support.js";
 import {
   createModelCatalogDecisions,
+  prepareModelCatalogDecisions,
   resolveCatalogDecisionRuntime,
 } from "./model-catalog-decisions.js";
 import type { ModelCatalogEntry } from "./model-catalog.types.js";
@@ -69,6 +73,49 @@ function nativeOwner(complete: boolean, loggedIn: boolean, isCurrent = () => tru
 }
 
 describe("captured model decisions", () => {
+  it("does not start private reads after retained authority revokes during reader preparation", async () => {
+    await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+      const owner = ensureProfileForEmail("catalog-authority@example.test");
+      const { authProfileId } = connectUserModelAccount({
+        ownerProfileId: owner.id,
+        credential: { type: "api_key", provider: "openai", key: "synthetic-private-key" },
+        assertCurrent() {},
+      });
+      const read = vi
+        .spyOn(personalCatalogReads, "readPersonalCatalogProfiles")
+        .mockRejectedValue(new Error("Private catalog read must not start"));
+      const revoked = new Error("Catalog read authority revoked");
+      let current = true;
+      const pending = prepareModelCatalogDecisions(
+        {
+          cfg: {},
+          agentId: "main",
+          agentDir: state.agentDir(),
+          workspaceDir: state.workspaceDir,
+          snapshot: { entries: [entry], routeVariants: [entry] },
+          metadataSnapshot: metadata,
+          preparedAuthStore: { version: 1, profiles: {} },
+          preferredProfileId: authProfileId,
+        },
+        {
+          async withCurrent<T>(consume: () => T): Promise<Awaited<T>> {
+            if (!current) {
+              throw revoked;
+            }
+            return await consume();
+          },
+        },
+      );
+      current = false;
+      try {
+        await expect(pending).rejects.toBe(revoked);
+        expect(read).not.toHaveBeenCalled();
+      } finally {
+        read.mockRestore();
+      }
+    });
+  });
+
   beforeEach(() => {
     // These cases describe prepared auth facts, not credentials from the host shell.
     for (const key of [
@@ -413,8 +460,8 @@ describe("captured model decisions", () => {
       isCurrent: () => true,
     });
     const assertCurrent = vi.fn();
-    await prepared.prepareSelectedAccountCatalog(assertCurrent, { allowDiscovery: true });
-    await prepared.prepareSelectedAccountCatalog(assertCurrent, { allowDiscovery: true });
+    await prepared.prepareSelectedAccountCatalog(assertCurrent, { refresh: true });
+    await prepared.prepareSelectedAccountCatalog(assertCurrent, {});
     expect(catalog).toHaveBeenCalledOnce();
     expect(assertCurrent).toHaveBeenCalled();
     expect(sharedSnapshot).not.toHaveProperty("providerOutcomes");
@@ -475,7 +522,7 @@ describe("captured model decisions", () => {
       isCurrent: () => current,
     });
     await expect(
-      prepared.prepareSelectedAccountCatalog(() => {}, { allowDiscovery: true }),
+      prepared.prepareSelectedAccountCatalog(() => {}, { refresh: true }),
     ).rejects.toThrow("changed");
     expect(prepared.snapshot.providerOutcomes).toEqual([]);
   });
@@ -647,6 +694,109 @@ describe("captured model decisions", () => {
         "openclaw",
       ),
     ).toMatchObject({ availability: false });
+  });
+
+  describe("with a ChatGPT account listing", () => {
+    const chatgpt = {
+      type: "oauth",
+      provider: "openai",
+      access: "synthetic-access",
+      refresh: "synthetic-refresh",
+      expires: Date.now() + 60 * 60_000,
+    } as const;
+    const platformKey = { type: "api_key", provider: "openai", key: "synthetic-key" } as const;
+    type Outcome =
+      | { profileId: string; status: "ready"; listedModelIds: readonly string[] }
+      | { profileId: string; status: "unavailable" };
+    const listing = (profileId: string, ...listedModelIds: string[]): Outcome => ({
+      profileId,
+      status: "ready",
+      listedModelIds,
+    });
+    const evaluate = (
+      outcomes: readonly Outcome[],
+      id: string,
+      options: { profileIds?: readonly string[]; withApiKey?: boolean; pin?: string } = {},
+    ) =>
+      createModelCatalogDecisions({
+        cfg: {},
+        agentId: "main",
+        workspaceDir: "/tmp/catalog-workspace",
+        pinnedProfileId: options.pin,
+        snapshot: {
+          entries: [],
+          routeVariants: [],
+          providerOutcomes: outcomes.map((outcome) => ({ provider: "openai", ...outcome })),
+        },
+        metadataSnapshot: metadata,
+        preparedAuthStore: {
+          version: 1,
+          profiles: {
+            ...Object.fromEntries(
+              (options.profileIds ?? ["openai:chatgpt"]).map((profileId) => [profileId, chatgpt]),
+            ),
+            ...(options.withApiKey ? { "openai:platform": platformKey } : {}),
+          },
+        },
+        routeResolverFactory: routeResolverFactory({
+          ...dualRoutes,
+          preferredAuthRequirement: "subscription",
+        }),
+      }).evaluateEntry({ provider: "openai", id }, undefined, "codex");
+    // The listing returned gpt-5.5 as a hidden row and did not return gpt-5.4-pro.
+    const ready = listing("openai:chatgpt", "gpt-6-sol", "gpt-5.5");
+
+    it("does not offer an unlisted dual-route model to a ChatGPT-only account", () => {
+      const unlisted = evaluate([ready], "gpt-5.4-pro");
+      expect(unlisted).toMatchObject({ availability: false });
+      // The account is signed in; a missing-auth reason would render sign-in guidance.
+      expect(unlisted.unavailableReason).toBeUndefined();
+      expect(evaluate([ready], "gpt-5.5")).toMatchObject({
+        availability: true,
+        selectedProfileId: "openai:chatgpt",
+      });
+    });
+
+    it.each([
+      ["an OpenAI API key is also stored", ready, true],
+      [
+        "the listing is unavailable",
+        { profileId: "openai:chatgpt", status: "unavailable" } as const,
+        false,
+      ],
+    ])("keeps the subscription route when %s", (_label, outcome, withApiKey) => {
+      expect(evaluate([outcome], "gpt-5.4-pro", { withApiKey })).toMatchObject({
+        availability: true,
+        selectedProfileId: "openai:chatgpt",
+        selectedRoute: { authRequirement: "subscription" },
+      });
+    });
+
+    const selectedB = {
+      availability: true,
+      selectedProfileId: "openai:b",
+      selectedRoute: { authRequirement: "subscription" },
+    };
+    it.each([
+      ["it has no observation", [], selectedB],
+      [
+        "its discovery is unavailable",
+        [{ profileId: "openai:b", status: "unavailable" } as const],
+        selectedB,
+      ],
+      ["its listing returns the model", [listing("openai:b", "gpt-5.5-pro")], selectedB],
+      // A third account listing the model does not entitle the selected one.
+      [
+        "its listing omits the model",
+        [listing("openai:b", "gpt-5.5"), listing("openai:c", "gpt-5.5-pro")],
+        { availability: false },
+      ],
+    ])("uses only the selected account's listing when %s", (_label, outcomes, expected) => {
+      // Account A's ready listing omits gpt-5.5-pro and gpt-5.5; account B is selected.
+      const others = [listing("openai:a", "gpt-6-sol")];
+      const options = { profileIds: ["openai:a", "openai:b"], pin: "openai:b" };
+      expect(evaluate([...others, ...outcomes], "gpt-5.5-pro", options)).toMatchObject(expected);
+    });
   });
 
   it("distinguishes unknown choices from authoritative empty choices", async () => {
@@ -886,6 +1036,93 @@ describe("catalog decisions with prepared CLI auth directories", () => {
         availability: true,
         evidence: "runtime",
       });
+    });
+  });
+
+  it("lights up the Claude CLI sign-in wildcard only for models the Claude CLI catalog lists", async () => {
+    await withOpenClawTestState({ layout: "state-only" }, async (state) => {
+      cliBackendsTesting.setDepsForTest({
+        resolvePluginSetupCliBackend: () => undefined,
+        resolveRuntimeCliBackends: () => [
+          {
+            id: "claude-cli",
+            modelProvider: "anthropic",
+            pluginId: "anthropic",
+            config: { command: "claude" },
+          },
+          {
+            id: "google-gemini-cli",
+            modelProvider: "google",
+            pluginId: "google",
+            config: { command: "gemini" },
+          },
+        ],
+      });
+      const decisions = (pinned: boolean) =>
+        createModelCatalogDecisions({
+          cfg: {
+            agents: {
+              defaults: {
+                models: {
+                  "anthropic/*": { agentRuntime: { id: "claude-cli" } },
+                  "anthropic/claude-pinned": { agentRuntime: { id: "claude-cli" } },
+                  "anthropic/claude-http": { agentRuntime: { id: "openclaw" } },
+                  "anthropic/claude-typed": {},
+                  "google/*": { agentRuntime: { id: "google-gemini-cli" } },
+                },
+              },
+            },
+          },
+          agentId: "main",
+          workspaceDir: state.workspaceDir,
+          snapshot: {
+            entries: [
+              { provider: "claude-cli", id: "claude-listed", name: "Listed" },
+              { provider: "google-gemini-cli", id: "gemini-listed", name: "Listed" },
+            ],
+            routeVariants: [],
+          },
+          metadataSnapshot: cliMetadata,
+          preparedAuthStore: {
+            version: 1,
+            profiles: pinned
+              ? { "anthropic:work": { type: "api_key", provider: "anthropic", key: "synthetic" } }
+              : {},
+          },
+          preparedRuntimeAuthModes: { "claude-cli": "oauth", "google-gemini-cli": "oauth" },
+          preparedSyntheticAuthComplete: true,
+          ...(pinned
+            ? { preferredProfileId: "anthropic:work", pinnedProfileId: "anthropic:work" }
+            : {}),
+        });
+      const owner = decisions(false);
+      const availability = (provider: string, id: string) =>
+        owner.evaluateEntry({ provider, id }).availability;
+
+      expect(availability("anthropic", "claude-listed")).toBe(true);
+      // API-only rows stay out of a Claude CLI picker without a sign-in prompt.
+      const apiOnly = owner.evaluateEntry({ provider: "anthropic", id: "claude-mythos-5" });
+      expect(apiOnly.availability).toBe(false);
+      expect(apiOnly.unavailableReason).toBeUndefined();
+      expect(availability("anthropic", "claude-pinned")).toBe(true);
+      expect(availability("anthropic", "claude-typed")).toBe(true);
+      // An exact override to another runtime stays with ordinary provider auth, not Claude CLI.
+      expect(owner.evaluateEntry({ provider: "anthropic", id: "claude-http" }).evidence).not.toBe(
+        "runtime",
+      );
+      // User-authored wildcards to other CLI backends are unchanged.
+      expect(availability("google", "gemini-unlisted")).toBe(true);
+      // A pinned API-key account, not the Claude CLI login, answers for its own models.
+      const account = decisions(true);
+      const mythos = { provider: "anthropic", id: "claude-mythos-5" };
+      const host = account.evaluateEntry(mythos);
+      expect(host).toMatchObject({ availability: true, selectedProfileId: "anthropic:work" });
+      expect(
+        account.evaluateNative({ ...mythos, name: "Claude Mythos 5" }, host).availability,
+      ).toBe(true);
+      expect(
+        owner.evaluateNative({ ...mythos, name: "Claude Mythos 5" }, apiOnly).availability,
+      ).toBe(false);
     });
   });
 });

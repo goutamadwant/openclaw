@@ -5,6 +5,9 @@ const SUPPORTED_END = '[//]: # "secretref-supported-list-end"';
 const UNSUPPORTED_START = '[//]: # "secretref-unsupported-list-start"';
 const UNSUPPORTED_END = '[//]: # "secretref-unsupported-list-end"';
 
+const compareText = (left: string, right: string): number =>
+  left < right ? -1 : left > right ? 1 : 0;
+
 function replaceMarkedBlock(params: {
   source: string;
   startMarker: string;
@@ -45,7 +48,7 @@ function replaceMarkedBlock(params: {
 }
 
 function uniqueSorted(values: Iterable<string>): string[] {
-  return [...new Set(values)].toSorted((a, b) => a.localeCompare(b));
+  return [...new Set(values)].toSorted(compareText);
 }
 
 function unique(values: Iterable<string>): string[] {
@@ -67,7 +70,7 @@ function formatSupportedLines(matrix: SecretRefCredentialMatrixDocument): string
   }
   const authProfileLines = matrix.entries
     .filter((entry) => entry.configFile === "auth-profile-store")
-    .toSorted((a, b) => (a.refPath ?? a.path).localeCompare(b.refPath ?? b.path))
+    .toSorted((a, b) => compareText(a.refPath ?? a.path, b.refPath ?? b.path))
     .map((entry) => {
       const path = entry.refPath ?? entry.path;
       const condition = entry.when

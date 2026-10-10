@@ -13,6 +13,7 @@ import type { PluginNativeNamespaceFact } from "./plugin-source-admission.types.
 import {
   copyPluginSourceFile,
   hashPluginSourceFile,
+  inspectPluginSourceDescriptor,
   isPluginSourceEntry,
   linkPluginSourceFile,
   pluginSourceIdentityChangedOnlyByCtime,
@@ -96,11 +97,26 @@ export function assertPluginNativeNamespaceHost(
   }
 }
 
+function readNativeDirectoryNames(directory: string, onEntry?: () => void): string[] {
+  const names: string[] = [];
+  const handle = fs.opendirSync(directory);
+  try {
+    for (let entry = handle.readSync(); entry; entry = handle.readSync()) {
+      onEntry?.();
+      names.push(entry.name);
+    }
+  } finally {
+    handle.closeSync();
+  }
+  return names.toSorted();
+}
+
 function inspectDirectory(
   directory: string,
   boundary: string,
   outputRoot?: string,
   sourceDependencies = true,
+  onDirectoryEntry?: () => void,
 ) {
   const members = new Map<string, NamespaceMember>();
   const directories = new Map<string, string>();
@@ -140,7 +156,7 @@ function inspectDirectory(
       }
       directories.set(source, relative);
       ancestors.add(source);
-      for (const name of fs.readdirSync(source).toSorted()) {
+      for (const name of readNativeDirectoryNames(source, onDirectoryEntry)) {
         if (isPluginSourceEntry(name)) {
           visit(path.join(source, name), path.join(relative, name), packageBoundary);
         }
@@ -172,12 +188,13 @@ function inspectDirectory(
         }
       } else {
         const modules = path.join(source, "node_modules");
-        for (const name of fs.existsSync(modules) ? fs.readdirSync(modules).toSorted() : []) {
+        for (const name of fs.existsSync(modules)
+          ? readNativeDirectoryNames(modules, onDirectoryEntry)
+          : []) {
           const names = name.startsWith("@")
-            ? fs
-                .readdirSync(path.join(modules, name))
-                .toSorted()
-                .map((entry) => `${name}/${entry}`)
+            ? readNativeDirectoryNames(path.join(modules, name), onDirectoryEntry).map(
+                (entry) => `${name}/${entry}`,
+              )
             : [name];
           for (const dependency of names) {
             if (dependency !== "openclaw" && dependency !== "@openclaw/plugin-sdk") {
@@ -202,13 +219,21 @@ export function pluginNativeNamespaceIsCurrent(
   fact: PluginNativeNamespaceFact,
   boundary: string,
   outputRoot?: string,
+  onDirectoryEntry?: () => void,
 ): boolean {
-  const source = inspectDirectory(fact.sourceDirectory, boundary, outputRoot);
+  const source = inspectDirectory(
+    fact.sourceDirectory,
+    boundary,
+    outputRoot,
+    true,
+    onDirectoryEntry,
+  );
   const captured = inspectDirectory(
     pluginNativeNamespaceDirectory(fact),
     pluginNativeNamespaceBoundary(fact),
     fact.referenceRoot ? outputRoot : undefined,
     Boolean(fact.referenceRoot),
+    onDirectoryEntry,
   );
   return (
     source.size === Object.keys(fact.members).length &&
@@ -236,6 +261,8 @@ export function capturePluginNativeNamespace(params: {
   inspectedFiles?: readonly string[];
   retainedRoot?: string;
   managedRoots?: readonly string[];
+  onDirectoryEntry?: () => void;
+  onSourceDescriptor?: (source: string, stat: fs.BigIntStats) => void;
 }) {
   const { sourceDirectory, boundary, capturedRoot, managed, outputRoot, previous } = params;
   const from = previous ? pluginNativeNamespaceDirectory(previous) : sourceDirectory;
@@ -245,6 +272,7 @@ export function capturePluginNativeNamespace(params: {
     fromBoundary,
     previous ? undefined : outputRoot,
     !previous || Boolean(previous.referenceRoot),
+    params.onDirectoryEntry,
   );
   const inspectedEntries = [...before.values()].map((member) => ({
     path: member.source,
@@ -269,6 +297,14 @@ export function capturePluginNativeNamespace(params: {
   }
   const directory = path.join(capturedRoot, "content");
   const linkedSources = new Set<string>();
+  const policyCheckedSources = new Set<string>();
+  const checkSourcePolicy = (member: NamespaceMember, stat: fs.BigIntStats) => {
+    if (pluginSourceStatIdentity(stat) !== member.identity) {
+      throw new Error("Native plugin companion changed during admission");
+    }
+    params.onSourceDescriptor?.(member.source, stat);
+    policyCheckedSources.add(member.source);
+  };
   let referenceRoot: string | undefined;
   try {
     for (const [relative, member] of before) {
@@ -290,10 +326,14 @@ export function capturePluginNativeNamespace(params: {
             ))) &&
         !(previous?.members[relative]?.boundaryChecked ?? boundaryFiles.has(member.source))
       ) {
-        linkPluginSourceFile(member.source, member.boundary, target);
+        linkPluginSourceFile(member.source, member.boundary, target, (stat) =>
+          checkSourcePolicy(member, stat),
+        );
         linkedSources.add(member.source);
       } else {
-        copyPluginSourceFile(member.source, member.boundary, target);
+        copyPluginSourceFile(member.source, member.boundary, target, {
+          onSourceDescriptor: (stat) => checkSourcePolicy(member, stat),
+        });
         fs.chmodSync(target, 0o600 | Number(member.stat.mode & 0o100n));
       }
     }
@@ -308,6 +348,14 @@ export function capturePluginNativeNamespace(params: {
       )
     ) {
       throw error;
+    }
+    for (const member of before.values()) {
+      if (!member.stat.isFile() || policyCheckedSources.has(member.source)) {
+        continue;
+      }
+      inspectPluginSourceDescriptor(member.source, member.boundary, (stat) =>
+        checkSourcePolicy(member, stat),
+      );
     }
     fs.rmSync(directory, { recursive: true, force: true });
     linkedSources.clear();
@@ -340,12 +388,14 @@ export function capturePluginNativeNamespace(params: {
     fromBoundary,
     previous ? undefined : outputRoot,
     !previous || Boolean(previous.referenceRoot),
+    params.onDirectoryEntry,
   );
   const captured = inspectDirectory(
     referenceRoot ? sourceDirectory : directory,
     referenceRoot ?? capturedRoot,
     referenceRoot ? outputRoot : undefined,
     Boolean(referenceRoot),
+    params.onDirectoryEntry,
   );
   if (
     before.size !== after.size ||

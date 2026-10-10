@@ -23,6 +23,9 @@ export type SecretRefCredentialMatrixDocument = {
   entries: CredentialMatrixEntry[];
 };
 
+const compareText = (left: string, right: string): number =>
+  left < right ? -1 : left > right ? 1 : 0;
+
 /** Builds the public SecretRef credential matrix from the source target registry. */
 export function buildSecretRefCredentialMatrix(
   registry: readonly SecretTargetRegistryEntry[] = getSecretTargetRegistry({ sourceTree: true }),
@@ -54,7 +57,7 @@ export function buildSecretRefCredentialMatrix(
     .map((entry) => {
       return entry;
     })
-    .toSorted((a, b) => a.id.localeCompare(b.id));
+    .toSorted((a, b) => compareText(a.id, b.id));
 
   return {
     version: 1,

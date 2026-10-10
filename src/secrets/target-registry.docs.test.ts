@@ -52,7 +52,6 @@ describe("secret target registry docs", () => {
   it("stays in sync with docs/reference/secretref-user-supplied-credentials-matrix.json", () => {
     expect(matrixDocsCase.raw).toBe(matrixDocsCase.expected);
   });
-
   it("stays in sync with docs/reference/secretref-credential-surface.md", () => {
     const surfacePath = path.join(
       process.cwd(),

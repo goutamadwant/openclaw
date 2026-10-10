@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { root as fsRoot } from "@openclaw/fs-safe/root";
 
 function assertDocsFile(repoRoot: string, filePath: string): fs.Stats {
   const docsRoot = path.join(repoRoot, "docs");
@@ -44,12 +45,32 @@ export function readSecretRefDocsFile(repoRoot: string, filePath: string): strin
   }
 }
 
-export function writeSecretRefDocsFile(repoRoot: string, filePath: string, content: string): void {
-  const fd = openDocsFile(repoRoot, filePath, fs.constants.O_WRONLY);
-  try {
-    fs.ftruncateSync(fd, 0);
-    fs.writeFileSync(fd, content, "utf8");
-  } finally {
-    fs.closeSync(fd);
+export async function writeSecretRefDocsFile(
+  repoRoot: string,
+  filePath: string,
+  content: string,
+): Promise<void> {
+  const original = assertDocsFile(repoRoot, filePath);
+  const referenceRoot = path.dirname(filePath);
+  const root = await fsRoot(referenceRoot, {
+    hardlinks: "reject",
+    mutationSymlinks: "reject",
+    symlinks: "reject",
+  });
+  await root.write(path.basename(filePath), content, {
+    assertBeforeMutation: () => {
+      const current = assertDocsFile(repoRoot, filePath);
+      if (current.dev !== original.dev || current.ino !== original.ino) {
+        throw new Error(`Docs file changed: ${filePath}`);
+      }
+    },
+    durable: true,
+    mode: original.mode & 0o777,
+    mutationSymlinks: "reject",
+    overwrite: true,
+  });
+  const installed = assertDocsFile(repoRoot, filePath);
+  if (installed.dev === original.dev && installed.ino === original.ino) {
+    throw new Error(`Docs file was not replaced: ${filePath}`);
   }
 }

@@ -1,12 +1,7 @@
 #!/usr/bin/env node
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  renderSecretRefCredentialMatrixJson,
-  renderSecretRefCredentialSurface,
-} from "../src/secrets/credential-matrix-docs.js";
-import { buildSecretRefCredentialMatrix } from "../src/secrets/credential-matrix.js";
-import { getSecretTargetRegistry } from "../src/secrets/target-registry-data.js";
+import { writeBundledChannelConfigMetadataModule } from "./generate-bundled-channel-config-metadata.js";
 import { readSecretRefDocsFile, writeSecretRefDocsFile } from "./lib/secretref-docs-file.js";
 
 const args = new Set(process.argv.slice(2));
@@ -18,6 +13,21 @@ if (check === write || args.size !== 1) {
 }
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const metadataResults = await writeBundledChannelConfigMetadataModule(check);
+const changedMetadata = metadataResults.filter((result) => result.changed);
+if (check && changedMetadata.length > 0) {
+  for (const result of changedMetadata) {
+    console.error(`SecretRef docs input drift: ${path.relative(repoRoot, result.outputPath)}`);
+  }
+  console.error("Run `pnpm config:channels:gen` and commit the generated changes.");
+  process.exit(1);
+}
+
+const [matrixDocs, credentialMatrix, targetRegistry] = await Promise.all([
+  import("../src/secrets/credential-matrix-docs.js"),
+  import("../src/secrets/credential-matrix.js"),
+  import("../src/secrets/target-registry-data.js"),
+]);
 
 const matrixPath = path.join(
   repoRoot,
@@ -25,22 +35,22 @@ const matrixPath = path.join(
 );
 const surfacePath = path.join(repoRoot, "docs/reference/secretref-credential-surface.md");
 const currentSurface = readSecretRefDocsFile(repoRoot, surfacePath);
-const registry = getSecretTargetRegistry({
+const registry = targetRegistry.getSecretTargetRegistry({
   sourceTree: true,
   sourceTreeRoot: path.join(repoRoot, "extensions"),
   env: {},
 });
-const matrix = buildSecretRefCredentialMatrix(registry);
+const matrix = credentialMatrix.buildSecretRefCredentialMatrix(registry);
 const artifacts = [
   {
     path: matrixPath,
     current: readSecretRefDocsFile(repoRoot, matrixPath),
-    expected: renderSecretRefCredentialMatrixJson(matrix),
+    expected: matrixDocs.renderSecretRefCredentialMatrixJson(matrix),
   },
   {
     path: surfacePath,
     current: currentSurface,
-    expected: renderSecretRefCredentialSurface(currentSurface, matrix),
+    expected: matrixDocs.renderSecretRefCredentialSurface(currentSurface, matrix),
   },
 ];
 
@@ -58,7 +68,7 @@ if (check) {
 }
 
 for (const artifact of changed) {
-  writeSecretRefDocsFile(repoRoot, artifact.path, artifact.expected);
+  await writeSecretRefDocsFile(repoRoot, artifact.path, artifact.expected);
   console.log(`Wrote ${path.relative(repoRoot, artifact.path)}`);
 }
 if (changed.length === 0) {

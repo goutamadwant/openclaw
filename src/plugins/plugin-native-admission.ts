@@ -40,6 +40,7 @@ import {
 } from "./plugin-source-capture-directory.js";
 import {
   hashPluginSourceFile,
+  inspectPluginSourceDescriptor,
   isPluginNativeExecutable,
   pluginSourceIdentityChangedOnlyByCtime,
   pluginSourceStatIdentity,
@@ -76,6 +77,7 @@ export type PluginNativeRecovery = {
   references: Map<string, PluginNativeArtifactFact>;
   namespaces: Map<string, PluginNativeNamespaceFact>;
   directories: Map<string, string>;
+  fork(relocate?: (source: string) => string): PluginNativeRecovery;
   retain(cache: PluginCache): void;
   dispose(): void;
   disposeAsync(): Promise<void>;
@@ -115,6 +117,18 @@ function createNativeRecovery(
     references,
     namespaces,
     directories,
+    fork(relocate = (source) => source) {
+      if (disposed) {
+        throw new Error("Plugin native recovery has been disposed");
+      }
+      return createNativeRecovery(
+        receipt,
+        new Map([...references].map(([source, fact]) => [relocate(source), { ...fact }])),
+        structuredClone(namespaces),
+        new Map([...directories].map(([source, namespace]) => [relocate(source), namespace])),
+        roots,
+      );
+    },
     retain(cache) {
       if (disposed) {
         throw new Error("Plugin native recovery has been disposed");
@@ -164,6 +178,10 @@ export function createPluginNativeAdmission(
   entryFile?: string,
   recovery?: PluginNativeRecovery,
   outputRoot?: string,
+  captureHooks?: {
+    onDirectoryEntry?: () => void;
+    onSourceDescriptor?: (source: string, stat: fs.BigIntStats) => void;
+  },
 ) {
   recovery?.retain(getPluginCache());
   const state = nativeAdmissionStateFor();
@@ -176,6 +194,8 @@ export function createPluginNativeAdmission(
   const prepared = recovery?.receipt ?? state.receipts.get(key);
   const selected = new Map<string, PluginNativeNamespaceFact>();
   const priorNamespaces = new Set<PluginNativeNamespaceFact>();
+  const createdNamespaces = new WeakSet<PluginNativeNamespaceFact>();
+  const policyValidatedNamespaces = new WeakSet<PluginNativeNamespaceFact>();
   const files = new Map<string, PluginNativeArtifactFact>();
   const targets = new Map<string, string>();
   const hardlinkedTargets = new Set<string>();
@@ -261,7 +281,10 @@ export function createPluginNativeAdmission(
       inspectedFiles: [owner?.source, owner?.setupSource, entryFile].filter(
         (file): file is string => Boolean(file),
       ),
+      onDirectoryEntry: captureHooks?.onDirectoryEntry,
+      onSourceDescriptor: captureHooks?.onSourceDescriptor,
     });
+    createdNamespaces.add(fact);
     // Overlapping managed namespaces share inodes; a new hardlink changes earlier captures too.
     for (const namespace of state.namespaces.values()) {
       for (const [relative, member] of Object.entries(namespace.members)) {
@@ -585,7 +608,12 @@ export function createPluginNativeAdmission(
             return false;
           }
           try {
-            return pluginNativeNamespaceIsCurrent(candidate, admittedBoundary, outputRoot);
+            return pluginNativeNamespaceIsCurrent(
+              candidate,
+              admittedBoundary,
+              outputRoot,
+              captureHooks?.onDirectoryEntry,
+            );
           } catch {
             return false;
           }
@@ -601,6 +629,21 @@ export function createPluginNativeAdmission(
         selected.set(alias, namespace);
       } else if (recovered) {
         alias = [...selected].find(([, candidate]) => candidate === namespace)?.[0] ?? alias;
+      }
+      if (
+        captureHooks?.onSourceDescriptor &&
+        !createdNamespaces.has(namespace) &&
+        !policyValidatedNamespaces.has(namespace)
+      ) {
+        for (const member of Object.values(namespace.members)) {
+          if (member.sizeBytes === undefined) {
+            continue;
+          }
+          inspectPluginSourceDescriptor(member.source, path.dirname(member.source), (stat) =>
+            captureHooks.onSourceDescriptor?.(member.source, stat),
+          );
+        }
+        policyValidatedNamespaces.add(namespace);
       }
       const relative = recovered
         ? pluginNativeNamespaceMemberRelativePath(namespace, recovered.capturedPath)

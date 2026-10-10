@@ -4,14 +4,24 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveConfigWidePluginManifestRegistry } from "../config/io.plugin-metadata.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import { openRootFileSync } from "../infra/boundary-file-read.js";
 import { shouldRejectHardlinkedPluginFiles } from "../plugins/hardlink-policy.js";
 import type { PluginManifestRecord } from "../plugins/manifest-registry.js";
 import { pluginCacheExistsSync } from "../plugins/plugin-cache-files.js";
-import { getPluginCacheRoot } from "../plugins/plugin-cache.js";
-import { getCachedPluginModuleLoader } from "../plugins/plugin-module-loader-cache.js";
+import {
+  createPluginCache,
+  getPluginCache,
+  getPluginCacheRoot,
+  getPluginCacheSource,
+  withPluginCache,
+} from "../plugins/plugin-cache.js";
+import { capturePluginGenerationArtifact } from "../plugins/plugin-generation-artifact.js";
+import {
+  createUncachedPluginModuleLoader,
+  getCachedPluginModuleLoader,
+} from "../plugins/plugin-module-loader-cache.js";
 import type { PluginOrigin } from "../plugins/plugin-origin.types.js";
 import { loadBundledPluginPublicArtifactModuleFromCandidatesSync } from "../plugins/public-surface-loader.js";
+import { preparePluginLoaderAliases } from "../plugins/sdk-alias.js";
 import { loadOfficialExternalChannelSecretContractApi } from "./official-external-channel-secret-contract.js";
 import type { ResolverContext, SecretDefaults } from "./runtime-shared.js";
 import type { SecretTargetRegistryEntry } from "./target-registry-types.js";
@@ -77,59 +87,226 @@ function resolvePluginContractApiPath(rootDir: string): string | null {
   return null;
 }
 
+const CONTRACT_CAPTURE_MAX_ENTRIES = 4_096;
+const CONTRACT_CAPTURE_MAX_TOTAL_ENTRIES = 65_536;
+const CONTRACT_CAPTURE_MAX_FILES = 1_024;
+const CONTRACT_CAPTURE_MAX_BYTES = 32 * 1024 * 1024;
+const CONTRACT_CAPTURE_EXTENSIONS = new Set([...CONTRACT_API_EXTENSIONS, ".json", ".node"]);
+
+function captureComputedContractDependencies(
+  artifact: ReturnType<typeof capturePluginGenerationArtifact>,
+  rootDir: string,
+): void {
+  const rootRealPath = fs.realpathSync(rootDir);
+  const directories: Array<{ path: string; ancestors: ReadonlySet<string> }> = [
+    { path: rootRealPath, ancestors: new Set() },
+  ];
+  let entryCount = 0;
+  while (directories.length > 0) {
+    const pending = directories.pop();
+    if (!pending) {
+      continue;
+    }
+    const directory = pending.path;
+    const directoryRealPath = fs.realpathSync(directory);
+    const relativeDirectory = path.relative(rootRealPath, directoryRealPath);
+    if (relativeDirectory.startsWith(`..${path.sep}`) || path.isAbsolute(relativeDirectory)) {
+      throw new Error("Channel secret contract dependency is outside the plugin root");
+    }
+    if (pending.ancestors.has(directoryRealPath)) {
+      throw new Error("Channel secret contract source tree contains a directory cycle");
+    }
+    const ancestors = new Set(pending.ancestors).add(directoryRealPath);
+    const handle = fs.opendirSync(directory);
+    try {
+      for (let entry = handle.readSync(); entry; entry = handle.readSync()) {
+        entryCount += 1;
+        if (entryCount > CONTRACT_CAPTURE_MAX_ENTRIES) {
+          throw new Error("Channel secret contract source tree exceeds the capture entry limit");
+        }
+        if (entry.name === ".git" || entry.name === "node_modules") {
+          continue;
+        }
+        const source = path.join(directory, entry.name);
+        const stat = entry.isSymbolicLink()
+          ? fs.statSync(source, { throwIfNoEntry: false })
+          : undefined;
+        if (entry.isSymbolicLink() && !stat) {
+          continue;
+        }
+        if (entry.isDirectory() || stat?.isDirectory()) {
+          directories.push({ path: source, ancestors });
+          continue;
+        }
+        if (
+          !(entry.isFile() || stat?.isFile()) ||
+          (entry.name !== "package.json" &&
+            path.extname(entry.name) !== "" &&
+            !CONTRACT_CAPTURE_EXTENSIONS.has(path.extname(entry.name)))
+        ) {
+          continue;
+        }
+        const sourceRealPath = fs.realpathSync(source);
+        const relativeSource = path.relative(rootRealPath, sourceRealPath);
+        if (relativeSource.startsWith(`..${path.sep}`) || path.isAbsolute(relativeSource)) {
+          throw new Error("Channel secret contract dependency is outside the plugin root");
+        }
+        artifact.captureResolvedModule(source, rootRealPath);
+      }
+    } finally {
+      handle.closeSync();
+    }
+  }
+}
+
 function loadExternalChannelSecretContractFromRecord(
   record: PluginManifestRecord,
   env: NodeJS.ProcessEnv = process.env,
   throwOnLoadError = false,
+  forceRejectHardlinks = false,
+  ephemeral = false,
 ): BundledChannelSecretContractApi | undefined {
   const contractPath = resolvePluginContractApiPath(record.rootDir);
   if (!contractPath) {
     return undefined;
   }
-  const artifacts = getPluginCacheRoot(record.rootDir).artifacts;
-  const rejectHardlinks = shouldRejectHardlinkedPluginFiles({
-    origin: record.origin,
-    rootDir: record.rootDir,
-    env,
-  });
-  const boundary = `channel-secret-contract:validated:${rejectHardlinks}`;
-  let validated = artifacts.get(boundary);
-  if (validated === undefined) {
-    const opened = openRootFileSync({
-      absolutePath: contractPath,
-      rootPath: record.rootDir,
-      boundaryLabel: "plugin root",
-      rejectHardlinks,
-      skipLexicalRootCheck: true,
+  const rejectHardlinks =
+    forceRejectHardlinks ||
+    shouldRejectHardlinkedPluginFiles({
+      origin: record.origin,
+      rootDir: record.rootDir,
+      env,
     });
-    if (opened.ok) {
-      fs.closeSync(opened.fd);
-      validated = { modulePath: opened.path, boundaryRoot: record.rootDir };
-    } else {
-      validated = null;
+  const cache = getPluginCache();
+  const source = ephemeral ? undefined : getPluginCacheSource(contractPath);
+  const cacheKey = `${path.resolve(record.rootDir)}\0${path.resolve(contractPath)}\0${rejectHardlinks}`;
+  const cached = ephemeral ? undefined : cache.channelSecretContracts.get(cacheKey);
+  if (cached) {
+    if (cached.status === "loaded") {
+      return cached.exports as BundledChannelSecretContractApi;
     }
-    artifacts.set(boundary, validated);
-  }
-  if (!validated) {
-    if (throwOnLoadError) {
-      throw new Error(`Unable to open channel secret contract for ${record.id}`);
+    if (cached.error && throwOnLoadError) {
+      throw cached.error;
     }
     return undefined;
   }
+  let artifact: ReturnType<typeof capturePluginGenerationArtifact> | undefined;
+  let admitted = false;
+  let retainArtifact = false;
+  let ephemeralContract: BundledChannelSecretContractApi | undefined;
+  let loadError: unknown;
+  let cleanupError: unknown;
   try {
-    const mod = getCachedPluginModuleLoader({
-      modulePath: validated.modulePath,
-      importerUrl: import.meta.url,
-    })(validated.modulePath) as BundledChannelSecretContractApi;
+    artifact = capturePluginGenerationArtifact(
+      record.rootDir,
+      contractPath,
+      (run) => run(),
+      undefined,
+      undefined,
+      undefined,
+      {
+        maxEntries: CONTRACT_CAPTURE_MAX_TOTAL_ENTRIES,
+        maxFiles: CONTRACT_CAPTURE_MAX_FILES,
+        maxBytes: CONTRACT_CAPTURE_MAX_BYTES,
+        maxFileBytes: CONTRACT_CAPTURE_MAX_BYTES,
+        maxTotalBytes: 512 * 1024 * 1024,
+      },
+    );
+    const capturedPath = artifact.resolve(contractPath, rejectHardlinks);
+    captureComputedContractDependencies(artifact, record.rootDir);
+    artifact.prepareModule(capturedPath);
+    if (rejectHardlinks) {
+      artifact.assertNoHardlinks();
+    }
+    const aliases = preparePluginLoaderAliases({
+      modulePath: contractPath,
+      argv1: process.argv[1],
+      moduleUrl: import.meta.url,
+    });
+    if (aliases.packageRoot) {
+      artifact.linkHost(aliases.packageRoot);
+    }
+    admitted = true;
+    const aliasMap = {
+      ...aliases.getAliasMap(),
+      ...artifact.sourceAliases,
+    };
+    const loadModule = () =>
+      (ephemeral ? createUncachedPluginModuleLoader : getCachedPluginModuleLoader)({
+        modulePath: contractPath,
+        loaderFilename: capturedPath,
+        disableAutomaticTsconfig: true,
+        importerUrl: import.meta.url,
+        tryNative: false,
+        aliasMap,
+      })(capturedPath) as BundledChannelSecretContractApi;
+    const mod = ephemeral ? withPluginCache(createPluginCache(), loadModule) : loadModule();
     if (mod.collectRuntimeConfigAssignments || mod.secretTargetRegistryEntries) {
-      return mod;
+      if (ephemeral) {
+        ephemeralContract = mod;
+      } else {
+        const previousDispose = source!.disposeModule;
+        source!.disposeModule = () => {
+          const failures: unknown[] = [];
+          try {
+            previousDispose?.();
+          } catch (error) {
+            failures.push(error);
+          }
+          try {
+            artifact?.dispose();
+          } catch (error) {
+            failures.push(error);
+          }
+          if (failures.length === 1) {
+            throw failures[0];
+          }
+          if (failures.length > 1) {
+            throw new AggregateError(failures, "Channel secret contract cleanup failed");
+          }
+        };
+        cache.channelSecretContracts.set(cacheKey, {
+          status: "loaded",
+          exports: mod,
+        });
+        retainArtifact = true;
+        return mod;
+      }
     }
   } catch (error) {
+    loadError = admitted
+      ? error
+      : new Error(`Unable to open channel secret contract for ${record.id}`, { cause: error });
+  } finally {
+    if (!retainArtifact) {
+      try {
+        artifact?.dispose();
+      } catch (error) {
+        cleanupError = error;
+      }
+    }
+  }
+  const error =
+    loadError && cleanupError
+      ? new AggregateError(
+          [loadError, cleanupError],
+          "Channel secret contract loading and cleanup failed",
+          { cause: loadError },
+        )
+      : (loadError ?? cleanupError);
+  if (!ephemeral) {
+    cache.channelSecretContracts.set(cacheKey, {
+      status: "unavailable",
+      ...(error ? { error } : {}),
+    });
+  }
+  if (error) {
     if (throwOnLoadError) {
       throw error;
     }
+    return undefined;
   }
-  return undefined;
+  return ephemeralContract;
 }
 
 function recordOwnsChannel(record: PluginManifestRecord, channelId: string): boolean {
@@ -209,7 +386,7 @@ export function loadChannelSecretContractApi(params: {
 
 export function loadChannelSecretContractApiForRecord(
   record: PluginManifestRecord,
-  options?: { throwOnLoadError?: boolean; bindToRecord?: boolean },
+  options?: { throwOnLoadError?: boolean; bindToRecord?: boolean; ephemeral?: boolean },
 ): BundledChannelSecretContractApi | undefined {
   if (record.origin === "bundled" && !options?.bindToRecord) {
     return loadBundledChannelSecretContractApi(record.id);
@@ -218,5 +395,7 @@ export function loadChannelSecretContractApiForRecord(
     record,
     process.env,
     options?.throwOnLoadError,
+    options?.bindToRecord === true,
+    options?.ephemeral === true,
   );
 }

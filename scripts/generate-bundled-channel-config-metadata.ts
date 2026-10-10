@@ -181,7 +181,7 @@ async function collectBundledChannelConfigMetadata(repoRoot: string) {
   return entries.toSorted((left, right) => left.channelId.localeCompare(right.channelId));
 }
 
-async function writeBundledChannelConfigMetadataModule(check: boolean) {
+export async function writeBundledChannelConfigMetadataModule(check: boolean) {
   const repoRoot = process.cwd();
   const outputPath = DEFAULT_OUTPUT_PATH;
   const entries = await collectBundledChannelConfigMetadata(repoRoot);
