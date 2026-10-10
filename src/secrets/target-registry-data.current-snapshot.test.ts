@@ -191,6 +191,19 @@ describe("getSecretTargetRegistry metadata reuse", () => {
     );
   });
 
+  it("rejects a missing requested source tree root", async () => {
+    const missingRoot = path.join(
+      makeTrackedTempDir("openclaw-target-registry-source", tempDirs),
+      "missing",
+    );
+    const { getSecretTargetRegistry } = await import("./target-registry-data.js");
+
+    expect(() =>
+      getSecretTargetRegistry({ sourceTree: true, sourceTreeRoot: missingRoot }),
+    ).toThrow("Unable to load bundled plugin manifests: invalid source tree root");
+    expect(metadataMocks.loadBundledPluginManifestRegistry).not.toHaveBeenCalled();
+  });
+
   it("excludes installed plugin contracts from source docs generation", async () => {
     const record = writeChannelContract({
       channelId: "installed",

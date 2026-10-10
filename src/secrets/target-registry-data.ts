@@ -1,4 +1,5 @@
 /** Builds the static and plugin-derived registry of secret migration targets. */
+import fs from "node:fs";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { loadBundledPluginManifestRegistry } from "../plugins/manifest-registry-build.js";
 import type { PluginManifestRecord } from "../plugins/manifest-registry.js";
@@ -248,9 +249,22 @@ export function getSecretTargetRegistry(params?: {
   sourceTreeRoot?: string;
 }): SecretTargetRegistryEntry[] {
   if (params?.sourceTree) {
+    let bundledRoot: string | undefined;
+    if (params.sourceTreeRoot) {
+      try {
+        bundledRoot = fs.realpathSync(params.sourceTreeRoot);
+        if (!fs.statSync(bundledRoot).isDirectory()) {
+          throw new Error("path is not a directory");
+        }
+      } catch (error) {
+        throw new Error(`Unable to load bundled plugin manifests: invalid source tree root`, {
+          cause: error,
+        });
+      }
+    }
     const manifestRegistry = loadBundledPluginManifestRegistry({
       env: params.env ?? process.env,
-      ...(params.sourceTreeRoot ? { bundledRoot: params.sourceTreeRoot } : {}),
+      ...(bundledRoot ? { bundledRoot } : {}),
     });
     const manifestError = manifestRegistry.diagnostics?.find(
       (diagnostic) =>

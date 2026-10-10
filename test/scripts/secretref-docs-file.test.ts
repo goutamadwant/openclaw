@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -28,6 +29,25 @@ afterEach(() => {
 });
 
 describe("SecretRef docs file boundary", () => {
+  it("checks repository artifacts when invoked outside the repository", () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "secretref-docs-cwd-"));
+    roots.push(cwd);
+    const repoRoot = path.resolve(import.meta.dirname, "../..");
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        path.join(repoRoot, "scripts/tsx.mjs"),
+        path.join(repoRoot, "scripts/generate-secretref-docs.ts"),
+        "--check",
+      ],
+      { cwd, encoding: "utf8" },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("SecretRef reference docs are up to date.");
+  }, 60_000);
+
   it("reads and writes a regular file under docs/reference", async () => {
     const { root, filePath } = makeDocsFile();
     expect(readSecretRefDocsFile(root, filePath)).toBe("original");

@@ -13,7 +13,7 @@ if (check === write || args.size !== 1) {
 }
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const metadataResults = await writeBundledChannelConfigMetadataModule(check);
+const metadataResults = await writeBundledChannelConfigMetadataModule(check, { repoRoot });
 const changedMetadata = metadataResults.filter((result) => result.changed);
 if (check && changedMetadata.length > 0) {
   for (const result of changedMetadata) {
