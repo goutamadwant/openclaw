@@ -49,6 +49,7 @@ type ResolvePluginModuleLoaderCacheEntryParams = {
   pluginSdkResolution?: PluginSdkResolutionPreference;
   cacheScopeKey?: string;
   disableAutomaticTsconfig?: boolean;
+  tsconfigPath?: string;
 };
 const MAX_TRACKED_SOURCE_TRANSFORM_TARGETS = 24;
 const pluginModuleLoaderStats = {
@@ -206,7 +207,7 @@ function resolvePluginModuleLoaderCacheEntry(params: ResolvePluginModuleLoaderCa
       });
   const moduleConfigCacheKey = `${tryNative ? "native" : "transform"}\0${aliases.cacheKey}`;
   const lazyNativeAliasFallback = tryNative && !useNodeModuleHooks();
-  const scopedCacheKey = `${loaderFilename}::${params.disableAutomaticTsconfig ? "no-tsconfig::" : ""}${params.cacheScopeKey ? `${params.cacheScopeKey}::` : ""}${moduleConfigCacheKey}`;
+  const scopedCacheKey = `${loaderFilename}::${params.disableAutomaticTsconfig ? "no-tsconfig::" : ""}${params.tsconfigPath ? `tsconfig:${params.tsconfigPath}::` : ""}${params.cacheScopeKey ? `${params.cacheScopeKey}::` : ""}${moduleConfigCacheKey}`;
   return {
     loaderFilename,
     getAliasMap: aliases.getAliasMap,
@@ -217,6 +218,7 @@ function resolvePluginModuleLoaderCacheEntry(params: ResolvePluginModuleLoaderCa
       : undefined,
     scopedCacheKey,
     disableAutomaticTsconfig: params.disableAutomaticTsconfig,
+    tsconfigPath: params.tsconfigPath,
   };
 }
 
@@ -238,7 +240,7 @@ function createPluginModuleLoader(
     });
     const automaticTsconfig = params.disableAutomaticTsconfig
       ? undefined
-      : resolveAutomaticJitiTsconfig(params.loaderFilename);
+      : (params.tsconfigPath ?? resolveAutomaticJitiTsconfig(params.loaderFilename));
     const jitiLoader = (params.createLoader ?? createJiti)(params.loaderFilename, {
       ...jitiOptions,
       ...(params.oneShot ? { fsCache: false, moduleCache: false } : {}),

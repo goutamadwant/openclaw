@@ -1,5 +1,6 @@
 /** Loads channel secret contract APIs from bundled and external plugin artifacts. */
 import fs from "node:fs";
+import { isBuiltin } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import JSON5 from "json5";
@@ -7,6 +8,7 @@ import { resolveConfigWidePluginManifestRegistry } from "../config/io.plugin-met
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { shouldRejectHardlinkedPluginFiles } from "../plugins/hardlink-policy.js";
+import { createJiti } from "../plugins/jiti-factory.js";
 import type { PluginManifestRecord } from "../plugins/manifest-registry.js";
 import { pluginCacheExistsSync } from "../plugins/plugin-cache-files.js";
 import {
@@ -22,6 +24,7 @@ import {
 } from "../plugins/plugin-module-loader-cache.js";
 import type { PluginOrigin } from "../plugins/plugin-origin.types.js";
 import { isPluginSourceEntry } from "../plugins/plugin-source-file.js";
+import { visitPluginSourceReferences } from "../plugins/plugin-source-references.js";
 import { loadBundledPluginPublicArtifactModuleFromCandidatesSync } from "../plugins/public-surface-loader.js";
 import { preparePluginLoaderAliases } from "../plugins/sdk-alias.js";
 import { loadOfficialExternalChannelSecretContractApi } from "./official-external-channel-secret-contract.js";
@@ -168,20 +171,24 @@ export function capturedTsconfigIsSafe(
   if (!compilerOptions.paths || typeof compilerOptions.paths !== "object") {
     return false;
   }
-  return Object.values(compilerOptions.paths).every(
-    (targets) =>
+  return Object.entries(compilerOptions.paths).every(
+    ([pattern, targets]) =>
+      typeof pattern === "string" &&
+      (pattern.match(/\*/g)?.length ?? 0) <= 1 &&
       Array.isArray(targets) &&
       targets.every((target) => {
         if (typeof target !== "string" || path.isAbsolute(target)) {
           return false;
         }
-        if (target.includes("*")) {
+        const wildcardCount = target.match(/\*/g)?.length ?? 0;
+        if (wildcardCount > 1 || (wildcardCount === 1 && !pattern.includes("*"))) {
           return false;
         }
-        if (target.split(/[\\/]/).includes("..")) {
+        const resolvedTarget = target.replace("*", "__openclaw_capture__");
+        if (resolvedTarget.split(/[\\/]/).includes("..")) {
           return false;
         }
-        const resolved = path.resolve(mappingRoot, target);
+        const resolved = path.resolve(mappingRoot, resolvedTarget);
         return (
           isPathWithinRoot(rootRealPath, resolved) &&
           isPathWithinRoot(rootRealPath, realpathExistingAncestor(resolved))
@@ -190,30 +197,164 @@ export function capturedTsconfigIsSafe(
   );
 }
 
-export function shouldDisableCapturedTsconfig(capturedPath: string, capturedRoot: string): boolean {
-  const enabled = process.env.JITI_TSCONFIG_PATHS;
-  if (enabled !== "1" && enabled !== "true") {
-    return false;
+function resolveCapturedTsconfigPaths(
+  sourceFiles: readonly string[],
+  configPath: string,
+  rootRealPath: string,
+): Record<string, [string]> | undefined {
+  const paths: Record<string, [string]> = {};
+  for (const source of sourceFiles) {
+    const extension = path.extname(source);
+    if (
+      path.basename(source) === "package.json" ||
+      extension === ".json" ||
+      extension === ".node"
+    ) {
+      continue;
+    }
+    if (extension !== "" && !/\.[cm]?[jt]sx?$/u.test(source)) {
+      return undefined;
+    }
+    const sourceText = fs.readFileSync(source, "utf8");
+    const resolver = createJiti(source, {
+      fsCache: false,
+      moduleCache: false,
+      tryNative: false,
+      tsconfigPaths: configPath,
+    });
+    const resolverWithoutTsconfig = createJiti(source, {
+      fsCache: false,
+      moduleCache: false,
+      tryNative: false,
+      tsconfigPaths: false,
+    });
+    try {
+      visitPluginSourceReferences(source, sourceText, resolver, (reference, kind) => {
+        if (
+          kind === "asset" ||
+          isBuiltin(reference) ||
+          reference.startsWith(".") ||
+          reference.startsWith("file:") ||
+          path.isAbsolute(reference)
+        ) {
+          return;
+        }
+        const resolved = resolver.esmResolve(reference, {
+          try: true,
+          conditions: ["node", "module-sync", kind],
+        });
+        const resolvedWithoutTsconfig = resolverWithoutTsconfig.esmResolve(reference, {
+          try: true,
+          conditions: ["node", "module-sync", kind],
+        });
+        const controlledByTsconfig = resolved !== resolvedWithoutTsconfig;
+        const target = resolved?.startsWith("file:")
+          ? fileURLToPath(resolved)
+          : resolved && path.isAbsolute(resolved)
+            ? resolved
+            : undefined;
+        if (!target || !fs.existsSync(target)) {
+          if (!controlledByTsconfig) {
+            return;
+          }
+          throw new Error("Captured tsconfig alias target could not be resolved");
+        }
+        const targetRealPath = fs.realpathSync(target);
+        const targetIsCaptured =
+          isPathWithinRoot(rootRealPath, path.resolve(target)) &&
+          isPathWithinRoot(rootRealPath, targetRealPath);
+        if (!targetIsCaptured && !controlledByTsconfig) {
+          return;
+        }
+        if (!targetIsCaptured) {
+          throw new Error("Captured tsconfig alias target is outside the captured root");
+        }
+        if (!controlledByTsconfig) {
+          return;
+        }
+        if (paths[reference]?.[0] && paths[reference][0] !== targetRealPath) {
+          throw new Error("Captured tsconfig alias resolves inconsistently");
+        }
+        paths[reference] = [targetRealPath];
+      });
+    } catch {
+      return undefined;
+    }
   }
+  return paths;
+}
+
+function findCapturedTsconfig(
+  capturedPath: string,
+  capturedRoot: string,
+): { configPath?: string; rootRealPath: string } {
   const rootRealPath = fs.realpathSync(capturedRoot);
   let directory = path.dirname(fs.realpathSync(capturedPath));
   while (isPathWithinRoot(rootRealPath, directory)) {
     const configPath = path.join(directory, "tsconfig.json");
     if (fs.existsSync(configPath)) {
-      return !capturedTsconfigIsSafe(configPath, rootRealPath);
+      return { configPath, rootRealPath };
     }
     if (directory === rootRealPath) {
       break;
     }
     directory = path.dirname(directory);
   }
-  return true;
+  return { rootRealPath };
+}
+
+export function shouldDisableCapturedTsconfig(capturedPath: string, capturedRoot: string): boolean {
+  const enabled = process.env.JITI_TSCONFIG_PATHS;
+  if (enabled === undefined || enabled === "" || enabled === "0" || enabled === "false") {
+    return false;
+  }
+  if (enabled !== "1" && enabled !== "true") {
+    return true;
+  }
+  const { configPath, rootRealPath } = findCapturedTsconfig(capturedPath, capturedRoot);
+  return !configPath || !capturedTsconfigIsSafe(configPath, rootRealPath);
+}
+
+function prepareCapturedTsconfig(
+  capturedPath: string,
+  capturedRoot: string,
+  sourceFiles: readonly string[],
+): { disableAutomaticTsconfig: boolean; tsconfigPath?: string } {
+  if (shouldDisableCapturedTsconfig(capturedPath, capturedRoot)) {
+    return { disableAutomaticTsconfig: true };
+  }
+  const enabled = process.env.JITI_TSCONFIG_PATHS;
+  if (enabled !== "1" && enabled !== "true") {
+    return { disableAutomaticTsconfig: false };
+  }
+  const { configPath, rootRealPath } = findCapturedTsconfig(capturedPath, capturedRoot);
+  if (!configPath) {
+    return { disableAutomaticTsconfig: true };
+  }
+  const exactPaths = resolveCapturedTsconfigPaths(sourceFiles, configPath, rootRealPath);
+  if (!exactPaths) {
+    return { disableAutomaticTsconfig: true };
+  }
+  const generatedDir = fs.mkdtempSync(path.join(capturedRoot, ".secret-contract-tsconfig-"));
+  const generatedPath = path.join(generatedDir, "tsconfig.json");
+  const relativePaths = Object.fromEntries(
+    Object.entries(exactPaths).map(([reference, [target]]) => [
+      reference,
+      [path.relative(generatedDir, target).split(path.sep).join("/")],
+    ]),
+  );
+  fs.writeFileSync(
+    generatedPath,
+    `${JSON.stringify({ compilerOptions: { baseUrl: ".", paths: relativePaths } }, null, 2)}\n`,
+    { encoding: "utf8", flag: "wx", mode: 0o600 },
+  );
+  return { disableAutomaticTsconfig: false, tsconfigPath: generatedPath };
 }
 
 function captureComputedContractDependencies(
   artifact: ReturnType<typeof capturePluginGenerationArtifact>,
   rootDir: string,
-): void {
+): readonly string[] {
   const rootRealPath = fs.realpathSync(rootDir);
   const directories: Array<{ path: string; ancestors: ReadonlySet<string> }> = [
     { path: rootRealPath, ancestors: new Set() },
@@ -275,7 +416,9 @@ function captureComputedContractDependencies(
       handle.closeSync();
     }
   }
-  artifact.captureResolvedModules(sourceFiles, rootRealPath);
+  return artifact
+    .captureResolvedModules(sourceFiles, rootRealPath)
+    .filter((source): source is string => source !== undefined);
 }
 
 function loadExternalChannelSecretContractFromRecord(
@@ -334,7 +477,7 @@ function loadExternalChannelSecretContractFromRecord(
     );
     const capturedPath = artifact.resolve(contractPath, rejectHardlinks);
     const capturedRoot = artifact.rootDir;
-    captureComputedContractDependencies(artifact, record.rootDir);
+    const capturedSourceFiles = captureComputedContractDependencies(artifact, record.rootDir);
     artifact.prepareModule(capturedPath);
     if (rejectHardlinks) {
       artifact.assertNoHardlinks();
@@ -348,6 +491,11 @@ function loadExternalChannelSecretContractFromRecord(
       artifact.linkHost(aliases.packageRoot);
     }
     admitted = true;
+    const capturedTsconfig = prepareCapturedTsconfig(
+      capturedPath,
+      capturedRoot,
+      capturedSourceFiles,
+    );
     const aliasMap = {
       ...aliases.getAliasMap(),
       ...artifact.sourceAliases,
@@ -356,7 +504,8 @@ function loadExternalChannelSecretContractFromRecord(
       (ephemeral ? createUncachedPluginModuleLoader : getCachedPluginModuleLoader)({
         modulePath: contractPath,
         loaderFilename: capturedPath,
-        disableAutomaticTsconfig: shouldDisableCapturedTsconfig(capturedPath, capturedRoot),
+        disableAutomaticTsconfig: capturedTsconfig.disableAutomaticTsconfig,
+        tsconfigPath: capturedTsconfig.tsconfigPath,
         importerUrl: import.meta.url,
         tryNative: false,
         aliasMap,

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { writeBundledChannelConfigMetadataModule } from "./generate-bundled-channel-config-metadata.js";
 import { readSecretRefDocsFile, writeSecretRefDocsFile } from "./lib/secretref-docs-file.js";
 
@@ -23,11 +23,26 @@ if (check && changedMetadata.length > 0) {
   process.exit(1);
 }
 
-const [matrixDocs, credentialMatrix, targetRegistry] = await Promise.all([
-  import("../src/secrets/credential-matrix-docs.js"),
-  import("../src/secrets/credential-matrix.js"),
-  import("../src/secrets/target-registry-data.js"),
-]);
+const sourceModuleUrl = (fileName: string): string =>
+  pathToFileURL(path.join(repoRoot, "src/secrets", fileName)).href;
+const [matrixDocs, credentialMatrix, targetRegistry] = (await Promise.all([
+  import(sourceModuleUrl("credential-matrix-docs.ts")),
+  import(sourceModuleUrl("credential-matrix.ts")),
+  import(sourceModuleUrl("target-registry-data.ts")),
+])) as [
+  {
+    renderSecretRefCredentialMatrixJson: (matrix: unknown) => string;
+    renderSecretRefCredentialSurface: (currentSurface: string, matrix: unknown) => string;
+  },
+  { buildSecretRefCredentialMatrix: (registry: unknown) => unknown },
+  {
+    getSecretTargetRegistry: (options: {
+      sourceTree: boolean;
+      sourceTreeRoot: string;
+      env: NodeJS.ProcessEnv;
+    }) => unknown;
+  },
+];
 
 const matrixPath = path.join(
   repoRoot,

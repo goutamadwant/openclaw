@@ -20,9 +20,11 @@ describe("plugin generation executable capture", () => {
         packages: new Map(),
         copyPackage,
       });
+      const realRoot = fs.realpathSync(root);
+      const realExecutable = fs.realpathSync(executable);
 
-      expect(capture.captureExecutableFile(symlink)).toBe(executable);
-      expect(copyPackage).toHaveBeenCalledWith(root, executable, false, true);
+      expect(capture.captureExecutableFile(symlink)).toBe(realExecutable);
+      expect(copyPackage).toHaveBeenCalledWith(realRoot, realExecutable, false, true);
       expect(capture.captureExecutableFile(root)).toBeUndefined();
       expect(copyPackage).toHaveBeenCalledOnce();
     } finally {

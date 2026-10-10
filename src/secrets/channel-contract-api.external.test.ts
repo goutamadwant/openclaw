@@ -384,7 +384,7 @@ describe("external channel secret contract api", () => {
     );
     fs.writeFileSync(
       path.join(record.rootDir, "secret-contract-api.ts"),
-      'import contract from "@fixture/contract"; export default contract;\n',
+      'const load = require as NodeJS.Require; export default load("@fixture/contract");\n',
       "utf8",
     );
     fs.rmSync(path.join(record.rootDir, "secret-contract-api.cjs"));
@@ -397,6 +397,123 @@ describe("external channel secret contract api", () => {
     expect(api?.secretTargetRegistryEntries?.map((entry) => entry.id)).toEqual([
       "channels.mapped.token",
     ]);
+  });
+
+  it("preserves safe wildcard TypeScript path mappings through the captured contract", () => {
+    const record = writeExternalChannelPlugin({ pluginId: "custom", channelId: "custom" });
+    const helperDir = path.join(record.rootDir, "helpers");
+    fs.mkdirSync(helperDir);
+    fs.writeFileSync(
+      path.join(helperDir, "contract.ts"),
+      channelSecretContractModuleSource("mapped-wildcard"),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(record.rootDir, "tsconfig.json"),
+      JSON.stringify({
+        compilerOptions: {
+          baseUrl: ".",
+          paths: { "@fixture/*": ["helpers/*"] },
+        },
+      }),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(record.rootDir, "secret-contract-api.ts"),
+      'import contract from "@fixture/contract"; export default contract;\n',
+      "utf8",
+    );
+    fs.rmSync(path.join(record.rootDir, "secret-contract-api.cjs"));
+    vi.stubEnv("JITI_TSCONFIG_PATHS", "true");
+
+    const api = loadChannelSecretContractApiForRecord(record as PluginManifestRecord, {
+      throwOnLoadError: true,
+    });
+
+    expect(api?.secretTargetRegistryEntries?.map((entry) => entry.id)).toEqual([
+      "channels.mapped-wildcard.token",
+    ]);
+  });
+
+  it("preserves wildcard paths that inherit baseUrl from a parent config", () => {
+    const record = writeExternalChannelPlugin({ pluginId: "custom", channelId: "custom" });
+    const helperDir = path.join(record.rootDir, "helpers");
+    fs.mkdirSync(helperDir);
+    fs.writeFileSync(
+      path.join(helperDir, "contract.ts"),
+      channelSecretContractModuleSource("mapped-inherited-base-url"),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(record.rootDir, "tsconfig.base.json"),
+      JSON.stringify({
+        compilerOptions: { baseUrl: ".", paths: { "*": ["stale-parent/*"] } },
+      }),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(record.rootDir, "tsconfig.json"),
+      JSON.stringify({
+        extends: "./tsconfig.base.json",
+        compilerOptions: { paths: { "@fixture/*": ["helpers/*"] } },
+      }),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(record.rootDir, "secret-contract-api.ts"),
+      'import contract from "@fixture/contract"; export default contract;\n',
+      "utf8",
+    );
+    fs.rmSync(path.join(record.rootDir, "secret-contract-api.cjs"));
+    vi.stubEnv("JITI_TSCONFIG_PATHS", "true");
+
+    const api = loadChannelSecretContractApiForRecord(record as PluginManifestRecord, {
+      throwOnLoadError: true,
+    });
+
+    expect(api?.secretTargetRegistryEntries?.map((entry) => entry.id)).toEqual([
+      "channels.mapped-inherited-base-url.token",
+    ]);
+  });
+
+  it("does not expose wildcard resolution to computed module references", () => {
+    const record = writeExternalChannelPlugin({ pluginId: "custom", channelId: "custom" });
+    const outsideDir = path.dirname(record.rootDir);
+    const markerPath = path.join(outsideDir, "computed-wildcard-executed.txt");
+    const outsideHelper = path.join(outsideDir, "computed-wildcard-helper.cjs");
+    fs.writeFileSync(
+      outsideHelper,
+      `require("node:fs").writeFileSync(${JSON.stringify(markerPath)}, "executed");\n${channelSecretContractModuleSource("escaped-computed")}`,
+      "utf8",
+    );
+    const helperDir = path.join(record.rootDir, "helpers");
+    fs.mkdirSync(helperDir);
+    fs.writeFileSync(
+      path.join(helperDir, "contract.cjs"),
+      channelSecretContractModuleSource("mapped-static"),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(record.rootDir, "tsconfig.json"),
+      JSON.stringify({
+        compilerOptions: { baseUrl: ".", paths: { "@fixture/*": ["helpers/*"] } },
+      }),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(record.rootDir, "secret-contract-api.cjs"),
+      'require("@fixture/contract"); const load = require; module.exports = load("@fixture/" + process.env.TARGET);\n',
+      "utf8",
+    );
+    vi.stubEnv("JITI_TSCONFIG_PATHS", "true");
+    vi.stubEnv("TARGET", `../../${path.basename(outsideHelper, ".cjs")}`);
+
+    expect(() =>
+      loadChannelSecretContractApiForRecord(record as PluginManifestRecord, {
+        throwOnLoadError: true,
+      }),
+    ).toThrow();
+    expect(fs.existsSync(markerPath)).toBe(false);
   });
 
   it("preserves dotted extensionless tsconfig inheritance inside the captured root", () => {
@@ -461,6 +578,82 @@ describe("external channel secret contract api", () => {
       "utf8",
     );
     vi.stubEnv("JITI_TSCONFIG_PATHS", "true");
+
+    expect(() =>
+      loadChannelSecretContractApiForRecord(record as PluginManifestRecord, {
+        throwOnLoadError: true,
+      }),
+    ).toThrow("Cannot find module '@escaped'");
+    expect(fs.existsSync(markerPath)).toBe(false);
+  });
+
+  it("does not follow an exact tsconfig alias package target outside the captured root", () => {
+    const record = writeExternalChannelPlugin({ pluginId: "custom", channelId: "custom" });
+    const outsideDir = makeTrackedTempDir(
+      "openclaw-channel-secret-contract-exact-package-main",
+      tempDirs,
+    );
+    const markerPath = path.join(outsideDir, "executed.txt");
+    const outsideHelper = path.join(outsideDir, "helper.cjs");
+    fs.writeFileSync(
+      outsideHelper,
+      `require("node:fs").writeFileSync(${JSON.stringify(markerPath)}, "executed");\n${channelSecretContractModuleSource("escaped-package-main")}`,
+      "utf8",
+    );
+    const aliasPackage = path.join(record.rootDir, "alias-package");
+    fs.mkdirSync(aliasPackage);
+    fs.writeFileSync(
+      path.join(aliasPackage, "package.json"),
+      JSON.stringify({ main: outsideHelper }),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(record.rootDir, "tsconfig.json"),
+      JSON.stringify({
+        compilerOptions: { baseUrl: ".", paths: { "@fixture/contract": ["alias-package"] } },
+      }),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(record.rootDir, "secret-contract-api.cjs"),
+      'module.exports = require("@fixture/contract");\n',
+      "utf8",
+    );
+    vi.stubEnv("JITI_TSCONFIG_PATHS", "true");
+
+    expect(() =>
+      loadChannelSecretContractApiForRecord(record as PluginManifestRecord, {
+        throwOnLoadError: true,
+      }),
+    ).toThrow();
+    expect(fs.existsSync(markerPath)).toBe(false);
+  });
+
+  it("does not honor an explicit external Jiti tsconfig path", () => {
+    const record = writeExternalChannelPlugin({ pluginId: "custom", channelId: "custom" });
+    const outsideDir = makeTrackedTempDir(
+      "openclaw-channel-secret-contract-explicit-tsconfig",
+      tempDirs,
+    );
+    const markerPath = path.join(outsideDir, "executed.txt");
+    const outsideHelper = path.join(outsideDir, "helper.cjs");
+    const outsideConfig = path.join(outsideDir, "tsconfig.json");
+    fs.writeFileSync(
+      outsideHelper,
+      `require("node:fs").writeFileSync(${JSON.stringify(markerPath)}, "executed");\n${channelSecretContractModuleSource("escaped-explicit")}`,
+      "utf8",
+    );
+    fs.writeFileSync(
+      outsideConfig,
+      JSON.stringify({ compilerOptions: { baseUrl: ".", paths: { "@escaped": [outsideHelper] } } }),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(record.rootDir, "secret-contract-api.cjs"),
+      'module.exports = require("@escaped");\n',
+      "utf8",
+    );
+    vi.stubEnv("JITI_TSCONFIG_PATHS", outsideConfig);
 
     expect(() =>
       loadChannelSecretContractApiForRecord(record as PluginManifestRecord, {
