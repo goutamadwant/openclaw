@@ -184,7 +184,7 @@ export function capturedTsconfigIsSafe(
         if (wildcardCount > 1 || (wildcardCount === 1 && !pattern.includes("*"))) {
           return false;
         }
-        const resolvedTarget = target.replace("*", "__openclaw_capture__");
+        const resolvedTarget = target.replaceAll("*", "__openclaw_capture__");
         if (resolvedTarget.split(/[\\/]/).includes("..")) {
           return false;
         }
