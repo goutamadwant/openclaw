@@ -246,7 +246,7 @@ describe("getSecretTargetRegistry metadata reuse", () => {
   });
 
   it.runIf(process.platform !== "win32")(
-    "reports a rejected contract boundary during source generation after runtime cached the rejection",
+    "allows a trusted bundled hardlink after runtime rejects the external record",
     async () => {
       const record = writeChannelContract({
         channelId: "blocked",
@@ -267,8 +267,8 @@ describe("getSecretTargetRegistry metadata reuse", () => {
       expect(
         getSecretTargetRegistry({ config: {}, env: {} }).map((entry) => entry.id),
       ).not.toContain("channels.blocked.token");
-      expect(() => getSecretTargetRegistry({ sourceTree: true })).toThrow(
-        "Unable to open channel secret contract for blocked",
+      expect(getSecretTargetRegistry({ sourceTree: true }).map((entry) => entry.id)).toContain(
+        "channels.blocked.token",
       );
     },
   );

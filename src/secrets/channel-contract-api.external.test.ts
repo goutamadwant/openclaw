@@ -862,12 +862,11 @@ describe("external channel secret contract api", () => {
       });
       const contractApi = requireChannelSecretContractApi(api);
       expectDiscordTokenRegistryEntry(contractApi);
-      expect(() =>
-        loadChannelSecretContractApiForRecord(record as PluginManifestRecord, {
-          throwOnLoadError: true,
-          bindToRecord: true,
-        }),
-      ).toThrow("Unable to open channel secret contract for discord");
+      const boundApi = loadChannelSecretContractApiForRecord(record as PluginManifestRecord, {
+        throwOnLoadError: true,
+        bindToRecord: true,
+      });
+      expectDiscordTokenRegistryEntry(requireChannelSecretContractApi(boundApi));
     },
   );
 

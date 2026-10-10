@@ -425,20 +425,17 @@ function loadExternalChannelSecretContractFromRecord(
   record: PluginManifestRecord,
   env: NodeJS.ProcessEnv = process.env,
   throwOnLoadError = false,
-  forceRejectHardlinks = false,
   ephemeral = false,
 ): BundledChannelSecretContractApi | undefined {
   const contractPath = resolvePluginContractApiPath(record.rootDir);
   if (!contractPath) {
     return undefined;
   }
-  const rejectHardlinks =
-    forceRejectHardlinks ||
-    shouldRejectHardlinkedPluginFiles({
-      origin: record.origin,
-      rootDir: record.rootDir,
-      env,
-    });
+  const rejectHardlinks = shouldRejectHardlinkedPluginFiles({
+    origin: record.origin,
+    rootDir: record.rootDir,
+    env,
+  });
   const cache = getPluginCache();
   const cacheKey = `${path.resolve(record.rootDir)}\0${path.resolve(contractPath)}\0${rejectHardlinks}`;
   const cached = ephemeral ? undefined : cache.channelSecretContracts.get(cacheKey);
@@ -652,7 +649,6 @@ export function loadChannelSecretContractApiForRecord(
     record,
     process.env,
     options?.throwOnLoadError,
-    options?.bindToRecord === true,
     options?.ephemeral === true,
   );
 }
