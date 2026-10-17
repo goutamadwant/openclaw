@@ -8,13 +8,20 @@ import {
   stripStructuralPrefixes,
 } from "./mentions.js";
 
-vi.mock("../../channels/plugins/registry-loaded.js", () => ({
+vi.mock("../../channels/plugins/registry-loaded.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../channels/plugins/registry-loaded.js")>()),
   getLoadedChannelPluginById: (id: string) =>
     id === "discord"
       ? {
           mentions: {
+            stripPatterns: () => ["@12345"],
             stripMentions: ({ text }: { text: string }) =>
-              text.replace(/^<@bot>$/u, "").replace("@Norma", ""),
+              text
+                .replace(/<@bot>/gu, "")
+                .replace(/<\s*>/gu, "")
+                .replace("[Bot Name]", "")
+                .replaceAll("[A A]", "")
+                .replace("@Norma", ""),
           },
         }
       : undefined,
@@ -202,6 +209,19 @@ describe("command mention stripping", () => {
     ).toBe("/steer preserve  two spaces\nand a newline");
   });
 
+  it("strips configured mentions whose pattern consumes its whitespace boundary", () => {
+    const boundaryCfg: OpenClawConfig = {
+      messages: { groupChat: { mentionPatterns: [String.raw`(?:^|\s)@Norma(?=$|\s)`] } },
+    };
+    expect(stripCommandAddressingMentions("/status @Norma", {}, boundaryCfg)).toBe("/status");
+    const suffixBoundaryCfg: OpenClawConfig = {
+      messages: { groupChat: { mentionPatterns: [String.raw`@Norma(?:$|\s)`] } },
+    };
+    expect(stripCommandAddressingMentions("/status@Norma continue", {}, suffixBoundaryCfg)).toBe(
+      "/status continue",
+    );
+  });
+
   it("does not strip a configured pattern from the command name", () => {
     const commandCfg: OpenClawConfig = {
       messages: { groupChat: { mentionPatterns: ["acp"] } },
@@ -232,12 +252,35 @@ describe("command mention stripping", () => {
   it("strips standalone provider mentions without changing embedded argument text", () => {
     const ctx = { Provider: "discord" };
     expect(stripCommandAddressingMentions("/status <@bot>", ctx, {})).toBe("/status");
+    expect(stripCommandAddressingMentions("/status [Bot Name]", ctx, {})).toBe("/status");
+    expect(stripCommandAddressingMentions("/status [A A] A", ctx, {})).toBe("/status A");
+    expect(stripCommandAddressingMentions("/status [A A] A [A A] tail", ctx, {})).toBe(
+      "/status A tail",
+    );
+    expect(stripCommandAddressingMentions("/steer A AA", ctx, {})).toBe("/steer A AA");
     expect(stripCommandAddressingMentions("/steer /path/<@bot>/file", ctx, {})).toBe(
       "/steer /path/<@bot>/file",
     );
+    expect(stripCommandAddressingMentions("/steer <@bot>/file", ctx, {})).toBe(
+      "/steer <@bot>/file",
+    );
+    expect(stripCommandAddressingMentions("/steer /path/[Bot Name]/file", ctx, {})).toBe(
+      "/steer /path/[Bot Name]/file",
+    );
+    expect(stripCommandAddressingMentions("/steer [Bot Name]/file", ctx, {})).toBe(
+      "/steer [Bot Name]/file",
+    );
+  });
+
+  it("handles unmatched provider delimiters without quadratic scanning", () => {
+    const command = `/steer ${"[ ".repeat(16_384)}`;
+    const startedAt = performance.now();
+    expect(stripCommandAddressingMentions(command, { Provider: "discord" }, {})).toBe(command);
+    expect(performance.now() - startedAt).toBeLessThan(500);
   });
 
   it("keeps full mention stripping for non-command text", () => {
     expect(stripCommandAddressingMentions("hello Norma", {}, cfg)).toBe("hello");
+    expect(stripMentions("hello <@12345>", { Provider: "discord" }, {})).toBe("hello");
   });
 });
