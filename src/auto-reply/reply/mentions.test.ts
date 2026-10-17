@@ -3,6 +3,7 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
   buildMentionRegexes,
   matchesMentionPatterns,
+  stripCommandAddressingMentions,
   stripMentions,
   stripStructuralPrefixes,
 } from "./mentions.js";
@@ -144,5 +145,42 @@ describe("derived mention matching and stripping", () => {
     const startedAt = performance.now();
     expect(bot.strip(message)).toBe(message);
     expect(performance.now() - startedAt).toBeLessThan(500);
+  });
+});
+
+describe("command mention stripping", () => {
+  const cfg: OpenClawConfig = {
+    messages: { groupChat: { mentionPatterns: ["@Norma", "Norma"] } },
+  };
+
+  it("removes leading and command-suffix mentions", () => {
+    expect(stripCommandAddressingMentions("@Norma /status", {}, cfg)).toBe("/status");
+    expect(stripCommandAddressingMentions("/status@Norma", {}, cfg)).toBe("/status");
+  });
+
+  it("preserves matching text in command arguments", () => {
+    const command = "/acp spawn codex --cwd /Users/me/norma/projects/linkauto-app";
+    expect(stripCommandAddressingMentions(command, {}, cfg)).toBe(command);
+    expect(stripCommandAddressingMentions("/steer Norma", {}, cfg)).toBe("/steer Norma");
+    expect(stripCommandAddressingMentions("/status @Norma", {}, cfg)).toBe("/status @Norma");
+    expect(stripCommandAddressingMentions("/steer @Norma continue", {}, cfg)).toBe(
+      "/steer @Norma continue",
+    );
+    expect(stripCommandAddressingMentions("/steer @Norma continue  \n", {}, cfg)).toBe(
+      "/steer @Norma continue  \n",
+    );
+  });
+
+  it("evaluates configured patterns against the complete command text", () => {
+    const anchoredCfg: OpenClawConfig = {
+      messages: { groupChat: { mentionPatterns: ["acp$"] } },
+    };
+    const command = "/acp spawn codex --cwd /tmp/app";
+
+    expect(stripCommandAddressingMentions(command, {}, anchoredCfg)).toBe(command);
+  });
+
+  it("keeps full mention stripping for non-command text", () => {
+    expect(stripCommandAddressingMentions("hello Norma", {}, cfg)).toBe("hello");
   });
 });

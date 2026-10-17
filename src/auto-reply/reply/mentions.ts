@@ -358,13 +358,42 @@ export function stripStructuralPrefixes(text: string): string {
   return stripped.replace(stripped.startsWith("/") ? /[ \t]+/g : /\s+/g, " ");
 }
 
-export function stripMentions(
+function replaceMentionMatches(
+  text: string,
+  re: RegExp,
+  protectedStart: number | undefined,
+): { result: string; protectedStart: number | undefined } {
+  if (protectedStart === undefined) {
+    return { result: text.replace(re, " "), protectedStart };
+  }
+  const originalProtectedStart = protectedStart;
+  let removedLength = 0;
+  const result = text.replace(re, (match: string, ...args: unknown[]) => {
+    const offsetCandidate = args.at(-2);
+    const offset =
+      typeof offsetCandidate === "number" ? offsetCandidate : (args.at(-3) as number | undefined);
+    if (
+      offset === undefined ||
+      offset >= originalProtectedStart ||
+      offset + match.length > originalProtectedStart
+    ) {
+      return match;
+    }
+    removedLength += match.length - 1;
+    return " ";
+  });
+  return { result, protectedStart: protectedStart - removedLength };
+}
+
+function stripMentionsInternal(
   text: string,
   ctx: MsgContext,
   cfg: OpenClawConfig | undefined,
   agentId?: string,
+  protectedStart?: number,
 ): string {
   let result = text;
+  let boundary = protectedStart;
   const providerId =
     (ctx.Provider ? normalizeAnyChannelId(ctx.Provider) : null) ??
     (normalizeOptionalLowercaseString(ctx.Provider) as ChannelId | undefined) ??
@@ -388,16 +417,58 @@ export function stripMentions(
       warnRejected: false,
     });
   for (const re of [...configRegexes, ...providerRegexes]) {
-    result = result.replace(re, " ");
+    const replaced = replaceMentionMatches(result, re, boundary);
+    result = replaced.result;
+    boundary = replaced.protectedStart;
   }
   if (providerMentions?.stripMentions) {
-    result = providerMentions.stripMentions({
-      text: result,
+    const head = providerMentions.stripMentions({
+      text: boundary === undefined ? result : result.slice(0, boundary),
       ctx,
       cfg,
       agentId,
     });
+    if (boundary === undefined) {
+      result = head;
+    } else {
+      result = `${head}${result.slice(boundary)}`;
+      boundary = head.length;
+    }
   }
-  result = result.replace(/@[0-9+]{5,}/g, " ");
-  return result.replace(/\s+/g, " ").trim();
+  const replaced = replaceMentionMatches(result, /@[0-9+]{5,}/g, boundary);
+  result = replaced.result;
+  boundary = replaced.protectedStart;
+  if (boundary === undefined) {
+    return result.replace(/\s+/g, " ").trim();
+  }
+  const head = result.slice(0, boundary).replace(/\s+/g, " ").trim();
+  return `${head}${result.slice(boundary)}`;
+}
+
+export function stripMentions(
+  text: string,
+  ctx: MsgContext,
+  cfg: OpenClawConfig | undefined,
+  agentId?: string,
+): string {
+  return stripMentionsInternal(text, ctx, cfg, agentId);
+}
+
+export function stripCommandAddressingMentions(
+  text: string,
+  ctx: MsgContext,
+  cfg: OpenClawConfig | undefined,
+  agentId?: string,
+): string {
+  const commandToken = /\/[^\s]+/u.exec(text);
+  if (!commandToken) {
+    return stripMentions(text, ctx, cfg, agentId);
+  }
+
+  const commandEnd = commandToken.index + commandToken[0].length;
+  const strippedHead = stripMentionsInternal(text, ctx, cfg, agentId, commandEnd);
+  if (!strippedHead.startsWith("/")) {
+    return stripMentions(text, ctx, cfg, agentId);
+  }
+  return strippedHead;
 }
