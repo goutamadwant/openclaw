@@ -3,6 +3,7 @@ import type { CronCompactJob } from "../../../api/types.ts";
 import { pathForRoute } from "../../../app-route-paths.ts";
 import { gatewayPresentationScope } from "../../../app/gateway-presentation-scope.ts";
 import type { ApplicationGateway } from "../../../app/gateway.ts";
+import { hasOperatorReadAccess } from "../../../app/operator-access.ts";
 import { Icon } from "../../../components/solid/icon.tsx";
 import { loadCompactCronJobsPage } from "../../../lib/cron/jobs.ts";
 import { createInitialCronState } from "../../../lib/cron/state.ts";
@@ -37,6 +38,7 @@ export function ChatSummaryAutomations(props: Props) {
   let dirty = true;
   let active = true;
   let presentationScope = 0;
+  let readAccess = true;
   // Imperative request admission samples live presentation without owning its dependency.
   const readPresented = () => untrack(presented);
   const visible = (isPresented = readPresented()) =>
@@ -49,12 +51,17 @@ export function ChatSummaryAutomations(props: Props) {
     revision();
     return showError;
   };
+  const canReadInventory = () => {
+    revision();
+    return readAccess;
+  };
 
   function reset(source: ApplicationGateway | undefined, key: string, retain = false) {
     const next = createInitialCronState<CronCompactJob>({
       client: source?.snapshot.client ?? null,
       connected: source?.snapshot.phase === "connected",
     });
+    readAccess = hasOperatorReadAccess(source?.snapshot.hello?.auth ?? null);
     const identity = resolveUiConversationIdentity(source?.snapshot ?? {}, key);
     next.cronSessionFilter =
       identity.sessionKey && identity.agentId
@@ -81,6 +88,7 @@ export function ChatSummaryAutomations(props: Props) {
     const current = cron;
     if (
       !visible(isPresented) ||
+      !readAccess ||
       !current.connected ||
       !current.cronSessionFilter ||
       current.cronLoading ||
@@ -135,9 +143,16 @@ export function ChatSummaryAutomations(props: Props) {
         }
         const nextIdentity = JSON.stringify(resolveUiConversationIdentity(snapshot, key));
         const changed = lifecycle.transition(snapshot);
-        if (changed || identity !== nextIdentity) {
-          reset(source, key, identity === nextIdentity && snapshot.phase !== "connected");
+        const nextReadAccess = hasOperatorReadAccess(snapshot.hello?.auth ?? null);
+        const accessChanged = readAccess !== nextReadAccess;
+        if (changed || identity !== nextIdentity || accessChanged) {
+          reset(
+            source,
+            key,
+            !accessChanged && identity === nextIdentity && snapshot.phase !== "connected",
+          );
           identity = nextIdentity;
+          readAccess = nextReadAccess;
         }
         if (dirty) {
           void load();
@@ -268,18 +283,20 @@ export function ChatSummaryAutomations(props: Props) {
   );
   return (
     <openclaw-chat-summary-automations ref={(element) => (host = element)}>
-      <Show
-        when={state().cronJobs.length > 0}
-        fallback={<Show when={props.gateway && (!loaded() || error())}>{content()}</Show>}
-      >
-        <details class="chat-details__group" data-details-group="automations" open>
-          <summary class="chat-details__caption">
-            {t("chat.sessionDetails.automations")}
-            <span>{state().cronJobsTotal ?? state().cronJobs.length}</span>
-            <Icon name="chevronDown" />
-          </summary>
-          {content()}
-        </details>
+      <Show when={canReadInventory()}>
+        <Show
+          when={state().cronJobs.length > 0}
+          fallback={<Show when={props.gateway && (!loaded() || error())}>{content()}</Show>}
+        >
+          <details class="chat-details__group" data-details-group="automations" open>
+            <summary class="chat-details__caption">
+              {t("chat.sessionDetails.automations")}
+              <span>{state().cronJobsTotal ?? state().cronJobs.length}</span>
+              <Icon name="chevronDown" />
+            </summary>
+            {content()}
+          </details>
+        </Show>
       </Show>
     </openclaw-chat-summary-automations>
   );

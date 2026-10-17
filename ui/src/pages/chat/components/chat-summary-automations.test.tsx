@@ -8,6 +8,7 @@ import {
   createGatewayRequestMock,
   createTestGatewayClient,
 } from "../../../test-helpers/gateway-client.ts";
+import { gatewayHelloForMethods } from "../../../test-helpers/gateway-methods.ts";
 import { mountSolid } from "../../../test-helpers/mount-solid.ts";
 import { flush, waitForSolid } from "../../../test-helpers/solid-settle.ts";
 import { ChatSummaryAutomations } from "./chat-summary-automations.tsx";
@@ -47,11 +48,17 @@ function sequence(...pages: (Page | Promise<Page>)[]) {
   pages.forEach((response) => request.mockResolvedValueOnce(response));
   return request;
 }
-function component(request = sequence(page([job()])), presented = true, offline = false) {
+function component(
+  request = sequence(page([job()])),
+  presented = true,
+  offline = false,
+  scopes?: readonly string[],
+) {
   const source = createApplicationGateway({
     ...createApplicationGateway().gateway.snapshot,
     client: createTestGatewayClient(request),
     phase: offline ? "offline" : "connected",
+    hello: scopes ? gatewayHelloForMethods(["cron.list"], scopes) : null,
     assistantAgentId: "ops",
     sessionKey: "agent:ops:task",
   });
@@ -86,6 +93,47 @@ function component(request = sequence(page([job()])), presented = true, offline 
 }
 
 afterEach(() => document.body.replaceChildren());
+
+it("does not request automation inventory without operator read access", () => {
+  const current = component(sequence(page([job()])), true, false, [
+    "operator.sessions.read",
+    "operator.sessions.write",
+  ]);
+  flush();
+  expect(current.request).not.toHaveBeenCalled();
+  expect(current.element.textContent).toBe("");
+});
+
+it("retires cached inventory and fences pending pages when read access is lost", async () => {
+  const pending = createDeferred<Page>();
+  const current = component(
+    sequence(page([job()]), pending.promise, page([job({ name: "Restored automation" })])),
+    true,
+    false,
+    ["operator.read"],
+  );
+  await current.ready();
+  current.cron();
+  flush();
+  expect(current.request).toHaveBeenCalledTimes(2);
+  current.publish({
+    ...current.gateway.snapshot,
+    hello: gatewayHelloForMethods(["cron.list"], ["operator.sessions.read"]),
+  });
+  flush();
+  expect(current.element.textContent).toBe("");
+  pending.resolve(page([job({ name: "Retired automation" })]));
+  await pending.promise;
+  flush();
+  expect(current.element.textContent).not.toContain("Retired automation");
+  expect(current.request).toHaveBeenCalledTimes(2);
+  current.publish({
+    ...current.gateway.snapshot,
+    hello: gatewayHelloForMethods(["cron.list"], ["operator.read"]),
+  });
+  await current.ready("Restored automation");
+  expect(current.request).toHaveBeenCalledTimes(3);
+});
 
 it.each([false, true])("coalesces hidden refreshes: %s", async (hiddenEvents) => {
   const pending = createDeferred<Page>();
