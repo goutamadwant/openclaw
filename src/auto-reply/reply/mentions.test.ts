@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
   buildMentionRegexes,
@@ -7,6 +7,18 @@ import {
   stripMentions,
   stripStructuralPrefixes,
 } from "./mentions.js";
+
+vi.mock("../../channels/plugins/registry-loaded.js", () => ({
+  getLoadedChannelPluginById: (id: string) =>
+    id === "discord"
+      ? {
+          mentions: {
+            stripMentions: ({ text }: { text: string }) =>
+              text.replace(/^<@bot>$/u, "").replace("@Norma", ""),
+          },
+        }
+      : undefined,
+}));
 
 function mention(name: string, emoji?: string) {
   const cfg: OpenClawConfig = {
@@ -156,18 +168,46 @@ describe("command mention stripping", () => {
   it("removes leading and command-suffix mentions", () => {
     expect(stripCommandAddressingMentions("@Norma /status", {}, cfg)).toBe("/status");
     expect(stripCommandAddressingMentions("/status@Norma", {}, cfg)).toBe("/status");
+    expect(stripCommandAddressingMentions("/status@NormaEvil", {}, cfg)).toBe("/status@NormaEvil");
+    expect(stripCommandAddressingMentions("/status@Norma.extra", {}, cfg)).toBe(
+      "/status@Norma.extra",
+    );
+    const splitSuffixCfg: OpenClawConfig = {
+      messages: { groupChat: { mentionPatterns: ["@Norma", "Evil"] } },
+    };
+    expect(stripCommandAddressingMentions("/status@NormaEvil", {}, splitSuffixCfg)).toBe(
+      "/status@NormaEvil",
+    );
+    expect(stripCommandAddressingMentions("/status@NormaEvil", { Provider: "discord" }, {})).toBe(
+      "/status@NormaEvil",
+    );
   });
 
   it("preserves matching text in command arguments", () => {
     const command = "/acp spawn codex --cwd /Users/me/norma/projects/linkauto-app";
     expect(stripCommandAddressingMentions(command, {}, cfg)).toBe(command);
-    expect(stripCommandAddressingMentions("/steer Norma", {}, cfg)).toBe("/steer Norma");
-    expect(stripCommandAddressingMentions("/status @Norma", {}, cfg)).toBe("/status @Norma");
-    expect(stripCommandAddressingMentions("/steer @Norma continue", {}, cfg)).toBe(
-      "/steer @Norma continue",
+    expect(stripCommandAddressingMentions("/steer:Norma continue", {}, cfg)).toBe(
+      "/steer:Norma continue",
     );
-    expect(stripCommandAddressingMentions("/steer @Norma continue  \n", {}, cfg)).toBe(
-      "/steer @Norma continue  \n",
+  });
+
+  it("continues removing standalone addressing mentions after commands", () => {
+    expect(stripCommandAddressingMentions("/steer Norma", {}, cfg)).toBe("/steer");
+    expect(stripCommandAddressingMentions("/status @Norma", {}, cfg)).toBe("/status");
+    expect(stripCommandAddressingMentions("/steer @Norma continue", {}, cfg)).toBe(
+      "/steer continue",
+    );
+    expect(
+      stripCommandAddressingMentions("/steer @Norma preserve  two spaces\nand a newline", {}, cfg),
+    ).toBe("/steer preserve  two spaces\nand a newline");
+  });
+
+  it("does not strip a configured pattern from the command name", () => {
+    const commandCfg: OpenClawConfig = {
+      messages: { groupChat: { mentionPatterns: ["acp"] } },
+    };
+    expect(stripCommandAddressingMentions("/acp spawn codex", {}, commandCfg)).toBe(
+      "/acp spawn codex",
     );
   });
 
@@ -178,6 +218,23 @@ describe("command mention stripping", () => {
     const command = "/acp spawn codex --cwd /tmp/app";
 
     expect(stripCommandAddressingMentions(command, {}, anchoredCfg)).toBe(command);
+  });
+
+  it("ignores zero-width mention matches in command arguments", () => {
+    const zeroWidthCfg: OpenClawConfig = {
+      messages: { groupChat: { mentionPatterns: ["$"] } },
+    };
+    const command = "/steer preserve  two spaces\nand a newline";
+
+    expect(stripCommandAddressingMentions(command, {}, zeroWidthCfg)).toBe(command);
+  });
+
+  it("strips standalone provider mentions without changing embedded argument text", () => {
+    const ctx = { Provider: "discord" };
+    expect(stripCommandAddressingMentions("/status <@bot>", ctx, {})).toBe("/status");
+    expect(stripCommandAddressingMentions("/steer /path/<@bot>/file", ctx, {})).toBe(
+      "/steer /path/<@bot>/file",
+    );
   });
 
   it("keeps full mention stripping for non-command text", () => {
