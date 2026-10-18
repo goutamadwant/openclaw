@@ -76,6 +76,17 @@ import { verifyGatewayStartReadiness } from "./start-health.js";
 import { repairLoadedGatewayServiceForStart } from "./start-repair.js";
 import type { DaemonLifecycleOptions } from "./types.js";
 
+const MANUAL_SERVICE_REMOVAL_DOCS =
+  "https://docs.openclaw.ai/install/uninstall#manual-service-removal-cli-not-installed";
+
+function renderGatewayServiceStopHints(): string[] {
+  return [formatCliCommand("openclaw gateway status --deep")];
+}
+
+function renderGatewayServiceUninstallHints(): string[] {
+  return [...renderGatewayServiceStopHints(), MANUAL_SERVICE_REMOVAL_DOCS];
+}
+
 function postRestartHealthAttempts(): number {
   return process.platform === "win32"
     ? Math.ceil(resolveGatewayStartupTiming().deadlineMs / DEFAULT_RESTART_HEALTH_DELAY_MS)
@@ -269,6 +280,7 @@ export async function runDaemonUninstall(opts: DaemonLifecycleOptions = {}) {
   return await runServiceUninstall({
     serviceNoun: "Gateway",
     service: resolveGatewayService(),
+    renderUninstallHints: renderGatewayServiceUninstallHints,
     opts,
     stopBeforeUninstall: true,
     assertNotLoadedAfterUninstall: true,
@@ -333,6 +345,7 @@ export async function runDaemonStop(opts: DaemonLifecycleOptions = {}) {
   return await runServiceStop({
     serviceNoun: "Gateway",
     service,
+    renderStopHints: renderGatewayServiceStopHints,
     opts,
     stopWhenNotLoaded: process.platform === "darwin" && Boolean(opts.disable),
     onNotLoaded: async ({ stdout }) => {
