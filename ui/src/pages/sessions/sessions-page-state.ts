@@ -1,4 +1,3 @@
-import { parseStrictPositiveInteger } from "@openclaw/normalization-core/number-coercion";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { onSettled } from "solid-js";
 import { createDeferredCore } from "../../../../src/shared/deferred.js";
@@ -12,7 +11,6 @@ import { showConfirmDialog } from "../../components/confirm-dialog.ts";
 import { createSessionDetails } from "../../components/session-details.ts";
 import { hasSessionArchiveDescendants } from "../../components/session-menu-descendants.ts";
 import { fetchSessionMenuWork } from "../../components/session-menu-work.ts";
-import "../../components/session-menu-solid.tsx";
 import { moveSessionFromMenu } from "../../components/session-placement-action.ts";
 import {
   formatBatchSessionRemovalError,
@@ -55,7 +53,6 @@ import {
   scopedSessionArtifactKey,
 } from "../../lib/sessions/session-key.ts";
 import { requestSessionInvolvement } from "../../lib/sessions/session-requests.ts";
-import { searchVisibleSessionTranscripts } from "../../lib/sessions/transcript-search.ts";
 import { formatPreservedWorktreesNotice } from "../../lib/sessions/worktree-preservation.ts";
 import { runControlUiPluginAction } from "../../plugins/control-ui-actions.ts";
 import {
@@ -75,6 +72,7 @@ import {
 import { createSessionsDialog } from "./page-dialog.ts";
 import { loadStoredGroupBy, saveStoredGroupBy } from "./page-state.ts";
 import type { SessionsPageRequestScope } from "./request-scope.ts";
+import { createSessionsRosterReadiness } from "./roster-readiness.ts";
 import type { SessionsRouteData } from "./route.ts";
 import {
   reconcileSelectedSessions,
@@ -88,6 +86,7 @@ import {
 } from "./session-menu.tsx";
 import type { SessionsAdvancedFiltersProps } from "./sessions-filters.tsx";
 import type { SessionsPageListBinding, SessionsPageState } from "./sessions-page-state.types.ts";
+import { createTranscriptSearch } from "./transcript-search.ts";
 
 registerSessionOrganizationEnglish();
 
@@ -120,6 +119,7 @@ export function createSessionsPage(
     page: 0,
     pageSize: 25,
     result: null,
+    roster: null,
     loading: false,
     refreshing: false,
     error: null,
@@ -138,6 +138,12 @@ export function createSessionsPage(
   });
   const state = observation.state;
   const publish = observation.invalidate;
+  const transcriptSearch = createTranscriptSearch({
+    state,
+    captureScope: captureRequestScope,
+    isCurrent: isRequestScopeCurrent,
+    listOptions: (scope) => sessionListOptions(scope.context, ""),
+  });
   // Route deep-link target (?session=...); unlike expandedSessionKey it also
   // narrows sessionListOptions so the linked session is guaranteed to load.
   let deepLinkSessionKey: string | null = null;
@@ -153,6 +159,7 @@ export function createSessionsPage(
   let listRequest: Promise<void> | undefined;
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   let appliedListResult: SessionsListResult | null | undefined;
+  const rosterReadiness = createSessionsRosterReadiness(state);
   const details = createSessionDetails({
     captureScope: captureRequestScope,
     isCurrent: isRequestScopeCurrent,
@@ -180,7 +187,7 @@ export function createSessionsPage(
   const observeAgentScope = watchAgentScope(() => {
     // Keep same-connection list serialization.
     retirePageOperations();
-    resetTranscriptSearchState(state.transcriptSearchQuery);
+    transcriptSearch.reset();
     if (!deepLinkSessionKey) {
       state.page = 0;
       state.selectedSessions = new Map();
@@ -213,36 +220,6 @@ export function createSessionsPage(
     },
   );
 
-  let transcriptSearchAbort: AbortController | undefined;
-  async function searchTranscripts(query: string) {
-    transcriptSearchAbort?.abort();
-    const lifetime = new AbortController();
-    transcriptSearchAbort = lifetime;
-    const scope = captureRequestScope();
-    if (!scope) {
-      state.transcriptSearch = null;
-      return;
-    }
-    const isCurrent = () => !lifetime.signal.aborted && isRequestScopeCurrent(scope);
-    const result = searchVisibleSessionTranscripts({
-      client: scope.client,
-      query,
-      listOptions: sessionListOptions(scope.context, ""),
-      isCurrent,
-    }).then(
-      (searchResult) => (isCurrent() ? searchResult : null),
-      (error: unknown) => {
-        if (isCurrent()) {
-          throw error;
-        }
-        return null;
-      },
-    );
-    state.transcriptSearch = result;
-    // Rendering owns errors; command callers still await the admitted request.
-    await result.catch(() => undefined);
-  }
-
   function synchronize() {
     bindSessionList();
     details.synchronize();
@@ -263,7 +240,8 @@ export function createSessionsPage(
     retirePageOperations();
     clearSearchTimer();
     listRequest = undefined;
-    resetTranscriptSearchState(state.transcriptSearchQuery);
+    rosterReadiness.retire();
+    transcriptSearch.reset();
     state.loading = false;
     state.refreshing = false;
   }
@@ -273,7 +251,7 @@ export function createSessionsPage(
     state.error = null;
     state.loading = false;
     state.refreshing = false;
-    resetTranscriptSearchState("");
+    transcriptSearch.reset("");
     state.selectedSessions = new Map();
     state.expandedSessionKey = null;
     deepLinkSessionKey = null;
@@ -390,17 +368,12 @@ export function createSessionsPage(
   }
 
   function sessionListOptions(context: ApplicationContext, search = state.searchQuery) {
-    return buildSessionsListQuery(context, {
-      activeMinutes: parseStrictPositiveInteger(state.activeMinutes),
-      // The Limit box is an explicit page size, so an unparseable entry falls
-      // back to the page default rather than to the shared roster page size.
-      limit: parseStrictPositiveInteger(state.limit) ?? SESSIONS_PAGE_DEFAULT_LIMIT,
-      includeGlobal: state.includeGlobal,
-      includeUnknown: state.includeUnknown,
-      statusFilter: state.statusFilter,
+    return buildSessionsListQuery(
+      context.agentSelection.state.scopeId,
+      state,
       deepLinkSessionKey,
       search,
-    });
+    );
   }
 
   function bindSessionList(refreshMissing = true): SessionsPageListBinding | undefined {
@@ -420,7 +393,7 @@ export function createSessionsPage(
       unsubscribeList?.();
       unsubscribeList = undefined;
       if (current?.sessions !== sessions || current.transcriptKey !== transcriptKey) {
-        resetTranscriptSearchState(state.transcriptSearchQuery);
+        transcriptSearch.reset();
       }
       // Retired rows cannot be selected under replacement text, even during debounce.
       state.result = null;
@@ -430,6 +403,7 @@ export function createSessionsPage(
       state.page = 0;
       listBinding = { sessions, query, key, transcriptKey };
       appliedListResult = undefined;
+      rosterReadiness.restart(captureRequestScope() !== null);
     }
     const binding = listBinding!;
     if (unsubscribeList) {
@@ -455,8 +429,7 @@ export function createSessionsPage(
     if (listBinding !== binding || application.sessions !== binding.sessions) {
       return;
     }
-    state.loading = snapshot.loading;
-    state.error = snapshot.error;
+    rosterReadiness.update(snapshot.loading, snapshot.error);
     const result = snapshot.result;
     if (!result) {
       return;
@@ -490,6 +463,7 @@ export function createSessionsPage(
     if (!binding || binding.sessions !== scope.sessions || !isRequestScopeCurrent(scope)) {
       return;
     }
+    state.error = null;
     await loadSessionList(binding, { force: true });
     if (isRequestScopeCurrent(scope) && listBinding === binding) {
       applyListSnapshot(binding, binding.sessions.listSnapshot(binding.query));
@@ -530,35 +504,6 @@ export function createSessionsPage(
   function clearSearchTimer() {
     clearTimeout(searchTimer);
     searchTimer = undefined;
-  }
-
-  function resetTranscriptSearchState(query: string) {
-    state.transcriptSearchQuery = query;
-    transcriptSearchAbort?.abort();
-    state.transcriptSearch = null;
-  }
-
-  function updateTranscriptSearchQuery(query: string) {
-    if (query === state.transcriptSearchQuery) {
-      return;
-    }
-    // Editing invalidates the visible results and the in-flight query so a
-    // late response cannot appear under different search text.
-    resetTranscriptSearchState(query);
-  }
-
-  async function runTranscriptSearch() {
-    const query = state.transcriptSearchQuery.trim();
-    if (!query) {
-      resetTranscriptSearchState("");
-      return;
-    }
-    const scope = captureRequestScope();
-    if (!scope) {
-      return;
-    }
-    state.transcriptSearchQuery = query;
-    await searchTranscripts(query);
   }
 
   function updateFilters(next: Parameters<SessionsAdvancedFiltersProps["onFiltersChange"]>[0]) {
@@ -1345,7 +1290,7 @@ export function createSessionsPage(
       },
       onTranscriptSearchChange: actions.updateTranscriptSearchQuery,
       onTranscriptSearch: (): void => void actions.runTranscriptSearch(),
-      onClearTranscriptSearch: () => resetTranscriptSearchState(""),
+      onClearTranscriptSearch: () => transcriptSearch.reset(""),
       onSortChange: (
         column: SessionsPageState["sortColumn"],
         direction: SessionsPageState["sortDir"],
@@ -1448,8 +1393,8 @@ export function createSessionsPage(
     patchSession,
     forkSession,
     runPluginAction,
-    updateTranscriptSearchQuery,
-    runTranscriptSearch,
+    updateTranscriptSearchQuery: transcriptSearch.update,
+    runTranscriptSearch: transcriptSearch.run,
     openSessionMenu,
     archive: archiveActions.archive,
   };
@@ -1468,12 +1413,12 @@ export function createSessionsPage(
     gatewayLifecycle.connect();
     return () => {
       active = false;
+      rosterReadiness.dispose();
       commandRetirement.resolve();
       observation.dispose();
       stopScope();
       unsubscribeList?.();
       pluginActionLifetime.abort();
-      transcriptSearchAbort?.abort();
       clearSearchTimer();
       inputDialog.abort();
       sessionPullRequestsForGateway(application.gateway).unwatch(menuOwner);
