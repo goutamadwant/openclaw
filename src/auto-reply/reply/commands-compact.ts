@@ -23,7 +23,7 @@ import { resolveSystemEventQueueKey } from "../../infra/system-event-ownership.j
 import { matchCommandPrefix, rejectUnauthorizedCommand } from "./command-gates.js";
 import type { CommandHandler, CommandHandlerResult } from "./commands-types.js";
 import { createCompactionNoticePayload } from "./compaction-notice.js";
-import { stripMentions, stripStructuralPrefixes } from "./mentions.js";
+import { stripCommandAddressingMentions, stripStructuralPrefixes } from "./mentions.js";
 
 function extractCompactInstructions(params: {
   rawBody?: string;
@@ -34,7 +34,7 @@ function extractCompactInstructions(params: {
 }): string | undefined {
   const raw = stripStructuralPrefixes(params.rawBody ?? "");
   const stripped = params.isGroup
-    ? stripMentions(raw, params.ctx, params.cfg, params.agentId)
+    ? stripCommandAddressingMentions(raw, params.ctx, params.cfg, params.agentId)
     : raw;
   const trimmed = stripped.trim();
   if (!trimmed.toLowerCase().startsWith("/compact")) {
