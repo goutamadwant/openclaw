@@ -74,6 +74,8 @@ describe("CommandPalette lifecycle", () => {
     await palette.updateComplete;
     await settlePalette(palette);
     expect(list).not.toHaveBeenCalled();
+    expect(palette.textContent).toContain("Reconnect to search Gateway content.");
+    expect(palette.querySelector(".cmd-palette__no-results")).toBeNull();
     findPaletteOption(palette, "Plugins", true)!.click();
     expect(palette.onNavigate).toHaveBeenCalledWith("plugins");
   });

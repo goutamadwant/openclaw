@@ -1,3 +1,4 @@
+import { createRouter } from "@openclaw/uirouter";
 import { createComponent, createSignal } from "solid-js";
 import { resolveThemeBranding } from "../../../../packages/gateway-protocol/src/theme.ts";
 import type { ApplicationContext } from "../../app/context.ts";
@@ -40,7 +41,7 @@ export function completeConfigContext(context: ApplicationContext): ApplicationC
   const subscribe = () => () => undefined;
   Object.assign(context, {
     basePath: context.basePath ?? "",
-    router: context.router ?? { subscribe },
+    router: context.router ?? createRouter({ routes: [] }),
     config: context.config ?? { current: { assistantIdentity: { name: "OpenClaw" } }, subscribe },
     settingsAgentSelection: context.settingsAgentSelection ?? {
       state: { selectedId: "main" },
@@ -55,7 +56,6 @@ export function completeConfigContext(context: ApplicationContext): ApplicationC
     },
     theme: context.theme ?? {
       branding: resolveThemeBranding(undefined),
-      serverSelection: null,
       subscribe,
     },
     overlays: context.overlays ?? { snapshot: {}, subscribe },
@@ -90,7 +90,6 @@ export function completeConfigContext(context: ApplicationContext): ApplicationC
   Object.assign(context.webPush, { snapshot: context.webPush.snapshot ?? {} });
   Object.assign(context.theme, {
     branding: context.theme.branding ?? resolveThemeBranding(undefined),
-    serverSelection: context.theme.serverSelection ?? null,
     settings: context.theme.settings ?? loadSettings(),
   });
   Object.assign(context.gateway, {

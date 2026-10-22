@@ -1,5 +1,7 @@
 import { redactSensitiveUrlLikeString } from "@openclaw/net-policy/redact-sensitive-url";
+import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { GatewayProtocolRequestTimeoutError } from "../../packages/gateway-client/src/protocol-request.js";
+import { readMissingScopeError } from "../../packages/gateway-protocol/src/gateway-error-details.js";
 import { note } from "../../packages/terminal-core/src/note.js";
 import { sanitizeTerminalText } from "../../packages/terminal-core/src/safe-text.js";
 import { formatCliCommand } from "../cli/command-format.js";
@@ -31,9 +33,12 @@ import { formatErrorMessage } from "../infra/errors.js";
 import { formatDurationSeconds } from "../infra/format-time/format-duration.js";
 import { readGatewayLastInstallationReplacementAsync } from "../infra/gateway-boot-lifecycle.js";
 import type { RuntimeEnv } from "../runtime.js";
+import {
+  formatSecretDegradationRetryHint,
+  redactSecretDegradationReason,
+} from "../secrets/runtime-degraded-state.js";
 import type { StatusSummary } from "../status/summary.js";
 import { VERSION } from "../version.js";
-import { projectDoctorSecretRuntimeDegradations } from "./doctor-secret-runtime-degradation.js";
 import { isServiceRepairExternallyManaged } from "./doctor-service-repair-policy.js";
 import { waitForGatewayDiagnostic } from "./gateway-diagnostic-readiness.js";
 import {
@@ -45,9 +50,64 @@ import {
   gatewayProbeResultSawGateway,
   gatewayProbeResultWasRateLimited,
 } from "./gateway-health-auth-diagnostic.js";
-import { formatGatewayClosedDiagnostic, formatHealthCheckFailure } from "./health-format.js";
+import {
+  formatGatewayClosedDiagnostic,
+  formatHealthCheckFailure,
+  formatHealthDiagnosticNote,
+} from "./health-format.js";
 import { formatSqliteWalHealthWarning } from "./sqlite-wal-health.js";
 import { formatTelemetryExporterSummary } from "./telemetry-exporter-summary.js";
+
+const DOCTOR_SECRET_OWNER_ID_MAX_CHARS = 96;
+const DOCTOR_SECRET_OWNER_PATH_MAX_CHARS = 120;
+const DOCTOR_SECRET_OWNER_VISIBLE_PATHS = 3;
+
+function safeDoctorSecretOwnerText(value: string, maxChars: number): string {
+  const safe = sanitizeTerminalText(redactSensitiveUrlLikeString(value));
+  return safe.length <= maxChars ? safe : `${truncateUtf16Safe(safe, maxChars - 1)}…`;
+}
+
+/** Projects Gateway-owned secret degradation into the shared bounded Doctor display shape. */
+function projectDoctorSecretRuntimeDegradations(
+  status: Pick<StatusSummary, "degradedSecretOwners" | "secretEgressProxy">,
+) {
+  const findings = (status.degradedSecretOwners ?? []).map((owner) => {
+    const ownerId = safeDoctorSecretOwnerText(owner.ownerId, DOCTOR_SECRET_OWNER_ID_MAX_CHARS);
+    const target = `${owner.ownerKind}:${ownerId}`;
+    const visiblePaths = owner.paths
+      .slice(0, DOCTOR_SECRET_OWNER_VISIBLE_PATHS)
+      .map((configPath) =>
+        safeDoctorSecretOwnerText(configPath, DOCTOR_SECRET_OWNER_PATH_MAX_CHARS),
+      );
+    const omittedPaths = owner.paths.length - visiblePaths.length;
+    const paths =
+      visiblePaths.join(", ") + (omittedPaths > 0 ? ` (+${omittedPaths} paths omitted)` : "");
+    return {
+      message: `${owner.degradationState ?? "cold"} ${target} (${paths || "no affected paths reported"}): ${redactSecretDegradationReason(owner.reason)}`,
+      path: visiblePaths[0] ?? "gateway",
+      target,
+      retryHint: formatSecretDegradationRetryHint(owner.reason),
+    };
+  });
+  if (status.secretEgressProxy?.state !== "degraded") {
+    return findings;
+  }
+  return [
+    ...findings,
+    {
+      message:
+        "Secret egress proxy: " +
+        safeDoctorSecretOwnerText(
+          status.secretEgressProxy.message ??
+            "TLS certificate preparation unavailable. Check Gateway logs.",
+          512,
+        ),
+      path: "secrets.egressProxy.enabled",
+      target: "capability:secret-egress-proxy",
+      retryHint: "Correct the reported certificate or clock problem before retrying the request.",
+    },
+  ];
+}
 
 function formatGatewayHealthDiagnostic(value: unknown): string {
   const raw = value instanceof Error ? value.message : String(value);
@@ -143,6 +203,14 @@ export async function collectGatewayHealthFindings(
       }),
     );
     const sqliteWalWarning = formatSqliteWalHealthWarning(status.sqliteWal);
+    if (status.modelReasoningWarning) {
+      findings.push(
+        warning(
+          formatGatewayHealthDiagnostic(status.modelReasoningWarning),
+          "Set reasoning: true on the configured model, or choose a non-thinking model.",
+        ),
+      );
+    }
     if (sqliteWalWarning) {
       findings.push(
         warning(`SQLite WAL: ${sqliteWalWarning}`, "Inspect openclaw status --deep output."),
@@ -194,35 +262,11 @@ function isGatewayCallTimeout(message: string): boolean {
   return /^gateway timeout after \d+ms(?:\n|$)/.test(message);
 }
 
-function resolveGatewayDiagnosticsTimeouts(timeoutMs: number, statusElapsedMs: number) {
-  // Preserve five seconds of channel work, plus the measured round-trip and result-delivery margin.
-  const transportMs = Math.ceil(statusElapsedMs) + 1_000;
-  const diagnosticsTimeoutMs = Math.min(
-    30_000,
-    Math.max(timeoutMs, 5_000 + transportMs, Math.ceil(statusElapsedMs * 3)),
-  );
-  return {
-    diagnosticsTimeoutMs,
-    channelProbeTimeoutMs: Math.max(1, diagnosticsTimeoutMs - transportMs),
-  };
-}
-
 function isGatewayHealthAuthUnavailableError(error: unknown): boolean {
-  return isGatewayCredentialsRequiredError(error) || isGatewaySecretRefUnavailableError(error);
-}
-
-function noteCliGatewayVersionSkew(status: StatusSummary | undefined): void {
-  const gatewayVersion = status?.runtimeVersion?.trim();
-  if (!gatewayVersion || gatewayVersion === VERSION) {
-    return;
-  }
-  note(
-    [
-      `This command is OpenClaw ${VERSION}; the running Gateway is OpenClaw ${gatewayVersion}.`,
-      "Check `openclaw --version`, `which openclaw`, and `openclaw gateway status --deep`.",
-      "If this mismatch is unexpected, update PATH so `openclaw` points to the version you want, or reinstall the Gateway service from that same OpenClaw install.",
-    ].join("\n"),
-    "OpenClaw version mismatch",
+  return (
+    isGatewayCredentialsRequiredError(error) ||
+    isGatewaySecretRefUnavailableError(error) ||
+    readMissingScopeError(error) !== null
   );
 }
 
@@ -243,7 +287,7 @@ function noteGatewayStateDirectory(
   });
   if (comparison.kind === "warn") {
     note(
-      `${comparison.message}\nRun plugin inspection and doctor --fix with the Gateway's OPENCLAW_STATE_DIR and OPENCLAW_CONFIG_PATH. To change the managed service, run \`openclaw gateway install --force\` from the intended profile and review operator-owned service overrides.`,
+      `${comparison.message}\nAfter moving or renaming the state directory, the running Gateway still uses the paths it started with. A full restart is required: \`openclaw gateway restart\` (not a reload). Then rerun \`openclaw doctor\`.\nRun plugin inspection and doctor --fix with the Gateway's OPENCLAW_STATE_DIR and OPENCLAW_CONFIG_PATH. To change the managed service, run \`openclaw gateway install --force\` from the intended profile and review operator-owned service overrides.`,
       "Gateway state directory mismatch",
     );
   }
@@ -279,7 +323,6 @@ async function noteInstalledGatewayStateDirectory(cfg: OpenClawConfig, timeoutMs
 export async function checkGatewayHealth(params: {
   runtime: RuntimeEnv;
   cfg: OpenClawConfig;
-  timeoutMs?: number;
 }): Promise<{ healthOk: boolean; authenticated: boolean; status?: StatusSummary }> {
   const replacement = await readLocalInstallationReplacement(params.cfg);
   if (replacement) {
@@ -287,10 +330,7 @@ export async function checkGatewayHealth(params: {
   }
   const { bindAgentToolGatewayRequest } = await import("../agents/tools/in-process-gateway.js");
   const requestGateway = bindAgentToolGatewayRequest({ hostedOnly: true });
-  const timeoutMs =
-    typeof params.timeoutMs === "number" && params.timeoutMs > 0
-      ? params.timeoutMs
-      : DEFAULT_RESTART_HEALTH_TIMEOUT_MS;
+  const timeoutMs = DEFAULT_RESTART_HEALTH_TIMEOUT_MS;
   let healthOk = false;
   let status: StatusSummary | undefined;
   let gatewaySnapshot: GatewayHello["snapshot"] | undefined;
@@ -311,6 +351,7 @@ export async function checkGatewayHealth(params: {
       method: "status",
       params: { includeChannelSummary: false },
       timeoutMs: remainingMs,
+      sharedStateMode: "read-only",
       config: params.cfg,
       onHelloOk: ({ snapshot }: GatewayHello) => {
         gatewaySnapshot = snapshot;
@@ -318,14 +359,27 @@ export async function checkGatewayHealth(params: {
       },
     });
     const statusElapsedMs = performance.now() - statusStartedAt;
-    const { diagnosticsTimeoutMs, channelProbeTimeoutMs } = resolveGatewayDiagnosticsTimeouts(
-      timeoutMs,
-      statusElapsedMs,
+    // Preserve five seconds of channel work, plus the measured round-trip and result-delivery margin.
+    const transportMs = Math.ceil(statusElapsedMs) + 1_000;
+    const diagnosticsTimeoutMs = Math.min(
+      30_000,
+      Math.max(timeoutMs, 5_000 + transportMs, Math.ceil(statusElapsedMs * 3)),
     );
+    const channelProbeTimeoutMs = Math.max(1, diagnosticsTimeoutMs - transportMs);
     const slowDiagnosticNote = (diagnostic: string) =>
       `Gateway answered status in ${formatDurationSeconds(statusElapsedMs)}; ${diagnostic} diagnostics did not finish within ${formatDurationSeconds(diagnosticsTimeoutMs)}. The host may be slow; this does not mark the Gateway unhealthy.`;
     healthOk = true;
-    noteCliGatewayVersionSkew(status);
+    const gatewayVersion = status?.runtimeVersion?.trim();
+    if (gatewayVersion && gatewayVersion !== VERSION) {
+      note(
+        [
+          `This command is OpenClaw ${VERSION}; the running Gateway is OpenClaw ${gatewayVersion}.`,
+          "Check `openclaw --version`, `which openclaw`, and `openclaw gateway status --deep`.",
+          "If this mismatch is unexpected, update PATH so `openclaw` points to the version you want, or reinstall the Gateway service from that same OpenClaw install.",
+        ].join("\n"),
+        "OpenClaw version mismatch",
+      );
+    }
     const noteWarning = (warning: string | undefined, title: string) => {
       if (warning) {
         note(sanitizeTerminalText(warning), title);
@@ -337,6 +391,7 @@ export async function checkGatewayHealth(params: {
       note(sqliteWalWarning, "SQLite WAL");
     }
     noteWarning(status.startupRecoveryWarning, "Startup session recovery");
+    noteWarning(status.modelReasoningWarning, "Model reasoning");
     const childRuntimeWarning = status.childRuntime
       ? formatMissingChildRuntimeWarning(status.childRuntime)
       : undefined;
@@ -367,12 +422,14 @@ export async function checkGatewayHealth(params: {
         method: "channels.status",
         params: { probe: true, timeoutMs: channelProbeTimeoutMs },
         timeoutMs: diagnosticsTimeoutMs,
+        sharedStateMode: "read-only",
         config: params.cfg,
       }),
       requestGateway({
         method: "diagnostics.stability",
         params: { type: "telemetry.exporter", limit: 1000 },
         timeoutMs: diagnosticsTimeoutMs,
+        sharedStateMode: "read-only",
         config: params.cfg,
       }),
     ]);
@@ -455,7 +512,7 @@ export async function checkGatewayHealth(params: {
     if (closedDiagnostic) {
       const gatewayDetails = buildGatewayConnectionDetails({ config: params.cfg });
       note(closedDiagnostic, "Gateway");
-      note(gatewayDetails.message, "Gateway connection");
+      note(formatHealthDiagnosticNote(gatewayDetails.message), "Gateway connection");
     } else {
       params.runtime.error(formatHealthCheckFailure(err));
     }
@@ -476,17 +533,15 @@ type GatewayMemoryProbe = {
 /** Probes gateway memory readiness without forcing deep embedding checks. */
 export async function probeGatewayMemoryStatus(params: {
   cfg: OpenClawConfig;
-  timeoutMs?: number;
 }): Promise<GatewayMemoryProbe> {
   const { bindAgentToolGatewayRequest } = await import("../agents/tools/in-process-gateway.js");
   const requestGateway = bindAgentToolGatewayRequest({ hostedOnly: true });
-  const timeoutMs =
-    typeof params.timeoutMs === "number" && params.timeoutMs > 0 ? params.timeoutMs : 8_000;
   try {
     const payload = await requestGateway<DoctorMemoryStatusPayload>({
       method: "doctor.memory.status",
       params: { probe: false },
-      timeoutMs,
+      timeoutMs: 8_000,
+      sharedStateMode: "read-only",
       config: params.cfg,
     });
     if (payload.health) {
