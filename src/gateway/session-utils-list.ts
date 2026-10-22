@@ -36,6 +36,7 @@ import {
 } from "./session-list-filters.js";
 import { sortAndLimitSessionEntries, type SessionEntryPair } from "./session-list-order.js";
 import { bindSessionListRowRead } from "./session-list-read-result.js";
+import type { SessionRowGeneration } from "./session-row-identity.js";
 import { withReadySessionRows } from "./session-row-prepared-read.js";
 import {
   prepareSessionRowPublication,
@@ -168,7 +169,7 @@ export function* selectSessionEntries(
 function buildSessionsListResult(
   params: Pick<SessionListFilterParams, "cfg" | "opts" | "modelCatalog">,
   list: SessionEntrySelection & { now: number; storePath: string },
-  { sessions, rowHistory }: { sessions: GatewaySessionRow[]; rowHistory?: GatewaySessionRow[][] },
+  { sessions, rowHistory }: { sessions: GatewaySessionRow[]; rowHistory?: SessionRowGeneration[] },
   policyConfig: OpenClawConfig,
   client?: GatewayClient | null,
 ): SessionsListResult {
@@ -201,7 +202,7 @@ function buildSessionsListResult(
           metadataSnapshot,
         })?.forAgent(defaultsAgentId, defaultsCatalog);
   const sharedRows =
-    opts.rowMode === "sidebar"
+    opts.rowMode === "sidebar" || opts.ifRowsRevision !== undefined
       ? shareSidebarSessionRows(sessions, opts.ifRowsRevision, rowHistory)
       : { sessions };
   const result = {
@@ -436,7 +437,10 @@ export function prepareProjectedSessionList(params: {
         projection.physicalPaths,
       )
     : undefined;
-  const presentation = prepareSessionRowPublication(projection, now)(client, projectRun);
+  const presentation = prepareSessionRowPublication(projection, now)(
+    client,
+    projectRun,
+  ).getPresentation();
   const prepared = prepareSessionRowSelection(projection, opts, {
     key: exactKey,
     now,
@@ -477,7 +481,9 @@ export function prepareProjectedSessionList(params: {
     prepared.candidateKeys(
       new Set([
         ...(projectRun?.candidateSessionIdsOrKeys() ?? []),
-        ...presentation.rowContext.subagentRuns.requesterSessionKeys(),
+        ...[...presentation.rowContext.subagentRuns.requesterSessionKeys()].filter(
+          (key) => presentation.rowContext.subagentRuns.countActiveDescendantRuns(key) > 0,
+        ),
         ...(presentation.rowContext.projectedSubagentActivity ?? []),
       ]),
     );
@@ -601,6 +607,16 @@ export async function listProjectedSessions(params: {
           let materializedRowCount = 0;
           projection.setArchivePageSize(selection.entries.length);
           const sessions: GatewaySessionRow[] = [];
+          const rowOptions = [false, true].map((includeTranscriptFields) =>
+            [false, true].map((isSentinel) => ({
+              includeDerivedTitles: opts.includeDerivedTitles && includeTranscriptFields,
+              includeLastMessage: opts.includeLastMessage && includeTranscriptFields,
+              includeActivitySummary: opts.includeActivitySummary === true,
+              rowMode: opts.rowMode,
+              omitSentinelChildren: opts.activeOnly && isSentinel,
+              childArchiveFilter: opts.archived ?? false,
+            })),
+          );
           for (let index = 0; index < selection.entries.length; index++) {
             const [key] = selection.entries[index]!;
             const target = getTarget(key);
@@ -608,6 +624,7 @@ export async function listProjectedSessions(params: {
               continue;
             }
             const includeTranscriptFields =
+              (!opts.includeDerivedTitles && !opts.includeLastMessage) ||
               index < SESSIONS_LIST_TRANSCRIPT_LIMIT + selection.ownerCount;
             const { row: sharedRow, record } = presentation.snapshot(
               {
@@ -615,14 +632,9 @@ export async function listProjectedSessions(params: {
                 key: target.key,
                 storePath: target.storeTarget.storePath,
               },
-              {
-                includeDerivedTitles: opts.includeDerivedTitles && includeTranscriptFields,
-                includeLastMessage: opts.includeLastMessage && includeTranscriptFields,
-                includeActivitySummary: opts.includeActivitySummary === true,
-                rowMode: opts.rowMode,
-                omitSentinelChildren: opts.activeOnly && sentinel(target.key),
-                childArchiveFilter: opts.archived ?? false,
-              },
+              rowOptions[Number(includeTranscriptFields)]![
+                opts.activeOnly && sentinel(target.key) ? 1 : 0
+              ]!,
             );
             if (!sharedRow || !record) {
               continue;
