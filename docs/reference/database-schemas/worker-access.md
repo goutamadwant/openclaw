@@ -13,6 +13,13 @@ awaits operations, retains owner-published facts, and checks current authority
 before effects. Moving a query to a worker is not enough: reuse those facts and
 batch related work so ordinary requests do not repeat database calls.
 
+## Rules for code changes
+
+- Kysely for ordinary SQLite; raw SQL only for schema, migrations, bootstrap, justified primitives. Write transactions synchronous: plan async work first, reread authoritative rows, then write; no Promise or `await` in transaction callbacks.
+- Database access: worker threads (read-only worker scope, SQLite writer broker), never Gateway main thread; main thread only awaits results and installs published facts. Exceptions: boot admission, migrations, Doctor/CLI one-shots, lock primitives. Existing main-thread access = legacy: never add more; migrate what you touch.
+- SQLite format/schema/integrity/index/table checks: once per physical DB per process load, shared across workers/handles; never add repeats, remove when touched. Clean-close seals skip startup validation; Doctor/explicit verification keep checks. [Lifecycle](/reference/database-schemas/integrity-and-recovery#integrity-checks).
+- Gateway owns every DB/state; writer receipts invalidate caches, uncovered reads stay direct. No foreign-commit probes; remove when touched. Outside writers use Gateway or exclusive offline custody. Keep live authority/snapshots; [contract](/reference/database-schemas/integrity-and-recovery#gateway-database-ownership).
+
 ## Choose the execution owner
 
 Actor-backed session managers serialize append preparation and committed view
@@ -57,6 +64,14 @@ and the agent's
 The lifecycle owner closes its read scope and drains accepted writes before
 retiring the store.
 
+On Node 26.8 and later, the synchronous query owner explicitly disposes private
+statements after execution or iterator completion, and cached statements on
+eviction or invalidation. Large string bindings otherwise remain native allocations
+until V8 collects their small JavaScript wrappers. Active reentrant statements
+finish before disposal. Supported runtimes without statement disposal retain
+their native garbage-collection and connection-close behavior. Page-cache
+budgets, schemas, transactions, and stored bytes are unchanged.
+
 Manual legacy compaction prepares its transcript, current session entry, persisted
 window owner, and primary conversation in one worker snapshot. The held session
 lifecycle carries those facts through execution. Its existing compaction-boundary
@@ -65,6 +80,13 @@ checked before commit. Aliases that share a transcript retain their own accounti
 row; a changed final token estimate updates accounting without counting compaction
 twice. Shared-state events follow the agent-store commit, and memory indexing keeps
 its existing post-compaction policy.
+
+Compaction and transcript writers compare already admitted database identities
+when a state directory has multiple path spellings, such as a symlink and its
+canonical path. SQLite uses physical file identity and birthtime; PostgreSQL uses
+namespace and store ID. These comparisons do not probe the filesystem or admit a
+new store. Agent, session, key, storage environment, lifecycle, and writer-claim
+checks still bind each write to its original target.
 
 Public GitHub coauthor attribution reads merge aliases, verified accounts, and
 credit preferences in one worker-owned snapshot statement. Enterprise attribution
@@ -388,6 +410,12 @@ outcomes return reads to the canonical worker. Bounded transcript payload reads
 remain with the history owner. See
 [`session-actor.worker.ts`](https://github.com/openclaw/openclaw/blob/main/src/config/sessions/session-actor.worker.ts)
 and [`session-actor-replica.ts`](https://github.com/openclaw/openclaw/blob/main/src/config/sessions/session-actor-replica.ts).
+
+Replica lookups resolve configured path spellings through the existing admission
+registry: SQLite uses the admitted physical identity and birthtime; PostgreSQL
+uses the admitted namespace and store ID. Symlinked and canonical paths therefore
+share warm state without a filesystem probe. Scoped write receipts still reject
+stale transcript facts and facts from a different store.
 
 Durable actor residency retains only tree links (`type`, `id`, `parentId`,
 `targetId`, `appendParentId`, and `appendMode`) and exact byte accounting.

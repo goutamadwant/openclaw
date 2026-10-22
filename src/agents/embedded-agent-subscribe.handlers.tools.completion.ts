@@ -15,7 +15,7 @@ import {
   consumeStructuredReplaySafeToolCall,
   consumeTrackedToolExecutionStarted,
 } from "./agent-tools.before-tool-call.state.js";
-import { normalizeTextForComparison } from "./embedded-agent-helpers.js";
+import { normalizeTextForComparison } from "./embedded-agent-helpers/messaging-dedupe.js";
 import {
   isDeliveredCoreCurrentChannelWidgetResult,
   readEmbeddedMessageDeliveryFact,
@@ -330,7 +330,7 @@ export async function handleToolExecutionEnd(
     });
   const sourceReplyFinal =
     deliveredMessageToolSourceReply || messageDelivery?.sourceReplyDelivered
-      ? resolveMessageToolSourceReplyFinal(startArgs)
+      ? resolveMessageToolSourceReplyFinal(startArgs, ctx.params.messageToolFinalByDefault)
       : undefined;
   ctx.state.sourceReplyDelivered ||= messageDelivery?.sourceReplyDelivered;
   if (
