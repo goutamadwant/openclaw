@@ -146,7 +146,12 @@ describe("A2A outbound channel delivery", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");
     const cfg = createA2aOutboundConfig({ token: "inbound-token" });
 
-    await expect(send(cfg)).rejects.toThrow("peer hermes has no url configured for outbound A2A");
+    await expect(send(cfg)).rejects.toMatchObject({
+      name: "PlatformMessageNotDispatchedError",
+      code: "OPENCLAW_PLATFORM_MESSAGE_NOT_DISPATCHED",
+      message: "peer hermes has no url configured for outbound A2A",
+      retryable: false,
+    });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
