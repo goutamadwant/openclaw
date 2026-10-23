@@ -11,7 +11,6 @@ import { recoverPendingDeliveries } from "./delivery-queue-recovery.js";
 import { enqueueDelivery } from "./delivery-queue-storage.js";
 import {
   RECOVERY_SUMMARY,
-  asDeliverFn,
   createRecoveryLog,
   installDeliveryQueueTmpDirHooks,
   loadPendingDeliveries,
@@ -53,7 +52,7 @@ describe("A2A delivery-queue recovery", () => {
     const deliver = vi.fn<DeliverFn>((params) => deliverOutboundPayloads(params));
     const recover = (send: DeliverFn) =>
       recoverPendingDeliveries({
-        deliver: asDeliverFn(send),
+        deliver: send,
         log: createRecoveryLog(),
         cfg,
         stateDir: tmpDir(),
