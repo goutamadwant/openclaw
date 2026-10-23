@@ -60,15 +60,23 @@ describe("structured_output", () => {
     '{"count":"bad"}',
     '{"count":9007199254740993}',
     JSON.stringify('{"count":3}'),
-  ])("nudges once then freezes schemaError for %j", async (result) => {
+  ])("nudges once then reports exhausted retry budget for %j", async (result) => {
     const { tool, submit } = makeTool();
     expect(Value.Check(tool.parameters, { result })).toBe(true);
     expect(tool.description).toContain('"count"');
     await expect(submit(result)).rejects.toThrow("Retry once");
-    expectRejected(await submit(result));
-    expectRejected(await submit('{"count":3}'));
-    expect(peek(runId)).toMatchObject({ structured: undefined, invalidAttempts: 2 });
-    expect(peek(runId)?.schemaError).toBeTruthy();
+    const rejectedRetry = await submit(result);
+    expectRejected(rejectedRetry);
+    const exhausted = await submit('{"count":3}');
+    expectRejected(exhausted);
+    expect(exhausted.details).toMatchObject({
+      schemaError: "structured_output retry budget exhausted; this result was not evaluated",
+    });
+    expect(peek(runId)).toEqual({
+      structured: undefined,
+      invalidAttempts: 2,
+      schemaError: (rejectedRetry.details as { schemaError: string }).schemaError,
+    });
   });
 
   it.each([{ result: ["one", "two"] }, { result: '["one","two"]' }])(
