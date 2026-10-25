@@ -134,11 +134,14 @@ export async function initFastReplySessionState(params: {
   const resetPreservedSelection = resetTriggered
     ? resolveResetPreservedSelection({ entry: existingEntry })
     : {};
-  const channel = normalizeOptionalString(ctx.Provider);
+  const existingEntryForPersistence = existingEntry ? { ...existingEntry } : undefined;
+  if (existingEntryForPersistence) {
+    delete existingEntryForPersistence.channel;
+  }
   const subject = normalizeOptionalString(ctx.GroupSubject);
   const groupChannel = normalizeOptionalString(ctx.GroupChannel);
   const sessionEntry: SessionEntry = {
-    ...(!resetTriggered ? existingEntry : undefined),
+    ...(!resetTriggered ? existingEntryForPersistence : undefined),
     sessionId,
     ...(!existingEntry && ctx.SessionCreation
       ? buildSessionCreationStamp(ctx.SessionCreation)
@@ -176,7 +179,6 @@ export async function initFastReplySessionState(params: {
     ttsAuto: existingEntry?.ttsAuto,
     responseUsage: existingEntry?.responseUsage,
     ...(normalizedChatType ? { chatType: normalizedChatType } : {}),
-    ...(channel ? { channel } : {}),
     ...(subject ? { subject } : {}),
     ...(groupChannel ? { groupChannel } : {}),
     topicName: normalizeOptionalString(ctx.TopicName) ?? existingEntry?.topicName,

@@ -15,6 +15,7 @@ import {
   closeOpenClawAgentDatabasesAsync,
   closeOpenClawAgentDatabasesForTest,
 } from "../../state/openclaw-agent-db.js";
+import { normalizeSessionDeliveryState } from "../../utils/delivery-context.shared.js";
 import { getReplyPayloadMetadata } from "../reply-payload.js";
 import { markCompleteReplyConfig } from "./get-reply-fast-path.test-support.js";
 import {
@@ -723,10 +724,14 @@ describe("maybeResolveNativeSlashCommandFastReply", () => {
   it("persists fast-path session initialization before command mutation", async () => {
     const storePath = path.join(tempDirs.make("openclaw-native-slash-init-"), "sessions.json");
     const sessionKey = "agent:main:main";
+    const delivery = normalizeSessionDeliveryState({
+      context: { channel: "telegram", to: "123" },
+    });
     await replaceSessionEntry({ sessionKey, storePath }, {
       sessionId: "session-1",
       updatedAt: 1,
       lastInteractionAt: 1,
+      delivery,
       channel: "old-channel",
     } as SessionEntry);
     handleCommandsMock.mockImplementationOnce(async (params: { sessionEntry?: unknown }) => {
@@ -736,10 +741,12 @@ describe("maybeResolveNativeSlashCommandFastReply", () => {
         sessionStartedAt: 100,
         updatedAt: 100,
         lastInteractionAt: 100,
-        channel: "telegram",
+        delivery,
       };
       expect(params.sessionEntry).toMatchObject(initialized);
       expect(persisted).toMatchObject(initialized);
+      expect(params.sessionEntry).not.toHaveProperty("channel");
+      expect(persisted).not.toHaveProperty("channel");
       return { shouldContinue: false, reply: { text: "ok" } };
     });
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(100);

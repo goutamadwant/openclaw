@@ -231,6 +231,7 @@ it.each<[string, NativeStatusSelectionCase]>([
     expect(fixture.read(targetSessionKey)?.providerOverride).toBeUndefined();
     expect(fixture.read(targetSessionKey)?.modelOverride).toBeUndefined();
   }
+  expect(fixture.read(targetSessionKey)).not.toHaveProperty("channel");
   expect(result).toMatchObject({ reply: { text: "selected model status" } });
   if (topicName) {
     expect(fixture.read(targetSessionKey)).toMatchObject({
