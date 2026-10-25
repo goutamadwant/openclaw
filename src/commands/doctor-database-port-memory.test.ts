@@ -12,14 +12,24 @@ import { rebuildPortedAgentMemory } from "./doctor-database-port-memory.js";
 const plugin = vi.hoisted(() => ({
   open: vi.fn<typeof getActiveMemorySearchManagerCore>(),
 }));
+const planner = vi.hoisted(() => ({
+  refresh: vi.fn(),
+}));
 
 // The selected plugin is external I/O; physical custody and config loading stay real.
 vi.mock("../plugins/memory-runtime.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../plugins/memory-runtime.js")>()),
   getActiveMemorySearchManagerCore: plugin.open,
 }));
+vi.mock("./doctor-database-port-planner.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./doctor-database-port-planner.js")>()),
+  refreshPortedAgentPlannerStatistics: planner.refresh,
+}));
 
-afterEach(() => plugin.open.mockReset());
+afterEach(() => {
+  plugin.open.mockReset();
+  planner.refresh.mockReset();
+});
 
 function manager(overrides: Partial<MemorySearchManager> = {}): MemorySearchManager {
   return {
@@ -62,6 +72,10 @@ it("rebuilds under fresh configured custody and keeps that custody through plugi
       expect(() => previousOwner?.assertCurrent()).toThrow();
 
       let memoryOwner: ReturnType<typeof captureGatewayStateOwner>;
+      const close = vi.fn(async () => {
+        expect(memoryOwner).toBeDefined();
+        expect(() => memoryOwner?.assertCurrent()).not.toThrow();
+      });
       const selected = manager({
         sync: async () => {
           memoryOwner = captureGatewayStateOwner(state.statePath("state", "openclaw.sqlite"));
@@ -69,10 +83,7 @@ it("rebuilds under fresh configured custody and keeps that custody through plugi
           expect(memoryOwner?.ownerId).not.toBe(previousOwner?.ownerId);
           expect(getScopedDatabaseEngineSelection()?.effectiveEngines.agent).toBe("sqlite");
         },
-        close: async () => {
-          expect(memoryOwner).toBeDefined();
-          expect(() => memoryOwner?.assertCurrent()).not.toThrow();
-        },
+        close,
       });
       plugin.open.mockResolvedValue({ manager: selected, searchRuntimeRegistered: true });
 
@@ -91,6 +102,14 @@ it("rebuilds under fresh configured custody and keeps that custody through plugi
         },
       ]);
       expect(plugin.open).toHaveBeenCalledTimes(1);
+      expect(planner.refresh).toHaveBeenCalledWith({
+        agentId: "main",
+        path: store,
+        assertCurrent: expect.any(Function),
+      });
+      expect(close.mock.invocationCallOrder[0]).toBeLessThan(
+        planner.refresh.mock.invocationCallOrder[0] ?? 0,
+      );
       expect(() => memoryOwner?.assertCurrent()).toThrow();
       expect(captureGatewayStateOwner(state.statePath("state", "openclaw.sqlite"))).toBeUndefined();
     },
@@ -160,6 +179,34 @@ it("reports one result per agent and continues after sync, dirty-state, and clos
       }
       expect(JSON.stringify(results)).not.toContain("private provider response");
       expect(JSON.stringify(results)).not.toContain("private close response");
+    },
+  );
+});
+
+it("reports planner refresh failure separately from a completed memory rebuild", async () => {
+  await withOpenClawTestState(
+    { scenario: "minimal", prefix: "port-memory-planner-failure-" },
+    async (state) => {
+      const store = path.join(state.agentDir("main"), "openclaw-agent.sqlite");
+      await fs.mkdir(path.dirname(store), { recursive: true });
+      await state.writeConfig({ agents: { entries: { main: {} } } });
+      plugin.open.mockResolvedValue({ manager: manager(), searchRuntimeRegistered: true });
+      planner.refresh.mockImplementationOnce(() => {
+        throw new Error("private database response");
+      });
+
+      const results = await rebuildPortedAgentMemory({ stateDir: state.stateDir, stores: [store] });
+
+      expect(results).toEqual([
+        expect.objectContaining({
+          agentId: "main",
+          path: store,
+          status: "rebuilt",
+          warning: expect.stringContaining("planner statistics were not refreshed"),
+        }),
+      ]);
+      expect(JSON.stringify(results)).not.toContain("private database response");
+      expect(results[0]?.warning).not.toContain("openclaw memory index");
     },
   );
 });

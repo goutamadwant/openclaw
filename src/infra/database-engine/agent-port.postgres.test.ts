@@ -108,6 +108,30 @@ describe.skipIf(!connection)("agent database port", () => {
     expect(await rows("SELECT 1 FROM pg_namespace WHERE nspname = $1", [namespace])).toEqual([]);
   });
 
+  it("publishes planner statistics for a materialized PostgreSQL namespace", async () => {
+    const descriptor = await agentPortProvider.loadDescriptor();
+    using source = openNodeSqliteDatabase(":memory:");
+    source.exec(descriptor.sqlite);
+    source.exec(`PRAGMA user_version = ${OPENCLAW_AGENT_SCHEMA_VERSION};
+      INSERT INTO schema_meta VALUES ('primary', 'agent', ${OPENCLAW_AGENT_SCHEMA_VERSION}, 'main', NULL, 1, 1);
+      INSERT INTO session_key_contract (id, main_key, updated_at) VALUES (1, 'main', 0);
+      INSERT INTO session_nodes (session_key, current_session_id, entry_json, updated_at)
+        VALUES ('agent:main:main', 'session', '{"sessionId":"session"}', 1);`);
+    const namespace = `agent_stats_${randomUUID().replaceAll("-", "")}`;
+    namespaces.add(namespace);
+
+    await port(sqlite(source), pg(namespace), descriptor, randomUUID());
+
+    expect(
+      await rows<{ analyzed: boolean }>(
+        `SELECT last_analyze IS NOT NULL AS analyzed
+        FROM pg_catalog.pg_stat_user_tables
+        WHERE schemaname = $1 AND relname = 'session_nodes'`,
+        [namespace],
+      ),
+    ).toEqual([{ analyzed: true }]);
+  });
+
   it("ports lazy raw and compressed predicates through the verified command into readable PostgreSQL history", async () => {
     await withOpenClawTestState(
       { scenario: "minimal", prefix: "agent-port-lazy-" },

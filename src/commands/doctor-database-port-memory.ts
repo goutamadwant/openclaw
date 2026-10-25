@@ -12,6 +12,7 @@ import { discoverConfigSecretTargetsByIds } from "../secrets/target-registry.js"
 import { listDefaultAgentDatabasePaths } from "../state/agent-database-path-discovery.js";
 import { inspectOpenClawRegisteredAgentDatabases } from "../state/openclaw-agent-db-registry-listing.js";
 import { resolveOpenClawAgentSqlitePath } from "../state/openclaw-agent-db.paths.js";
+import { refreshPortedAgentPlannerStatistics } from "./doctor-database-port-planner.js";
 
 type MemoryRebuildTarget = { agentId: string; path: string };
 type MemoryRebuildResult = MemoryRebuildTarget & {
@@ -149,6 +150,18 @@ export async function rebuildPortedAgentMemory(params: {
               }
             } finally {
               await manager.close?.();
+            }
+            if (outcome.status === "rebuilt") {
+              try {
+                assertCurrent();
+                refreshPortedAgentPlannerStatistics({ ...target, assertCurrent });
+              } catch {
+                outcome = {
+                  ...outcome,
+                  warning:
+                    "Memory rebuild completed, but PostgreSQL planner statistics were not refreshed. Ask the database administrator to ANALYZE the ported agent schema.",
+                };
+              }
             }
             results.push(outcome);
           } catch {

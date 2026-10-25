@@ -28,6 +28,7 @@ import {
   postgresCatalogQuery,
   readPostgresCatalog,
 } from "./postgres-catalog.js";
+import { analyzePostgresNamespace } from "./postgres-planner-statistics.js";
 export {
   admitDatabasePortDescriptor,
   DatabasePortDataError,
@@ -676,6 +677,7 @@ export async function materializeDatabasePort(params: {
         descriptor.version,
         params.storeId,
       ]);
+      await analyzePostgresNamespace(destination.db, destination.namespace, assertCurrent);
     } else {
       for (const trigger of descriptor.triggers ?? []) {
         destination.db.exec(trigger.sql);
