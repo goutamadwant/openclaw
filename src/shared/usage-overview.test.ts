@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { createEmptyCostUsageTotals } from "../infra/session-cost-usage-totals.js";
 import type { SessionCostSummary, UsageDailyBucket } from "../infra/session-cost-usage.types.js";
 import { createUsageAggregateAccumulator, usageModelIdentity } from "./usage-aggregates.js";
@@ -168,6 +168,7 @@ function sources(secondDate = "2026-02-01") {
       dailyBreakdown: [{ ...daily(date, tokens), ...totals }],
       dailyMessageCounts: [{ ...zeroMessages, date, total: 1, assistant: 1, toolCalls: 1 }],
       modelUsage: [{ provider, model, count: 1, totals }],
+      dailyModelUsage: [{ date, provider, model, tokens, cost: tokens / 10, count: 1 }],
       messageCounts: { ...zeroMessages, total: 1, assistant: 1, toolCalls: 1 },
       toolUsage: { totalCalls: 1, uniqueTools: 1, tools: [{ name: "read", count: 1 }] },
     };
@@ -188,6 +189,7 @@ function sources(secondDate = "2026-02-01") {
         dailyBreakdown: [...firstDay.dailyBreakdown!, ...secondDay.dailyBreakdown!],
         dailyMessageCounts: [...firstDay.dailyMessageCounts!, ...secondDay.dailyMessageCounts!],
         modelUsage: [...firstDay.modelUsage!, ...secondDay.modelUsage!],
+        dailyModelUsage: [...firstDay.dailyModelUsage!, ...secondDay.dailyModelUsage!],
         missingCostEntries: 2,
         missingCostByModel: { "provider::a/model": 1, "provider/a::model": 1 },
         messageCounts: { ...zeroMessages, total: 2, assistant: 2, toolCalls: 2 },
@@ -234,7 +236,7 @@ it("aggregates prepared family rows and all agents before selecting the page", (
   });
 });
 
-it("keeps an excluded agent's costs only in the calendar facet after day selection", () => {
+it("keeps excluded days' costs and providers in the calendar while summaries follow selection", () => {
   const result = overview(sources("2026-02-03"), {
     selectedDays: ["2026-02-01"],
     recentKeys: [],
@@ -254,6 +256,11 @@ it("keeps an excluded agent's costs only in the calendar facet after day selecti
     { date: "2026-02-02", totalTokens: 20 },
     { date: "2026-02-03", totalTokens: 30 },
   ]);
+  expect(result.aggregates.modelDaily).toEqual([
+    { date: "2026-02-01", provider: "provider::a", model: "model", tokens: 10, cost: 1, count: 1 },
+    { date: "2026-02-02", provider: "provider", model: "a::model", tokens: 20, cost: 2, count: 1 },
+    { date: "2026-02-03", provider: "provider::a", model: "model", tokens: 30, cost: 3, count: 1 },
+  ]);
   expect(result.aggregates.daily).toEqual([
     { date: "2026-02-01", tokens: 10, cost: 1, messages: 1, toolCalls: 1, errors: 0 },
     { date: "2026-02-02", tokens: 20, cost: 2, messages: 1, toolCalls: 1, errors: 0 },
@@ -264,6 +271,25 @@ it("keeps an excluded agent's costs only in the calendar facet after day selecti
     byCreator: [{ key: "person", totals: { totalTokens: 10 }, sessionCount: 1 }],
   });
 });
+
+it.each([{ query: "agent:first" }, { selectedSessions: ["family"] }])(
+  "keeps non-calendar filters on both calendar series: %j",
+  (filter) => {
+    const result = overview(sources("2026-02-03"), {
+      ...filter,
+      selectedDays: ["2026-02-01"],
+    });
+    expect(result.aggregates.costDaily?.map((entry) => entry.date)).toEqual([
+      "2026-02-01",
+      "2026-02-02",
+    ]);
+    expect(result.aggregates.modelDaily?.map((entry) => entry.date)).toEqual([
+      "2026-02-01",
+      "2026-02-02",
+    ]);
+    expect(result.totals.totalTokens).toBe(10);
+  },
+);
 
 it("counts activity independently of recently modified empty comparison rows", () => {
   const result = overview(
@@ -362,6 +388,56 @@ function aggregate(...summaries: Partial<SessionCostSummary>[]) {
   }
   return accumulator.finish();
 }
+
+it("sorts fresh aggregate arrays without copying them and isolates successive reports", () => {
+  const accumulator = createUsageAggregateAccumulator();
+  for (const [index, name] of ["first", "second"].entries()) {
+    const date = `2026-03-${12 - index}`;
+    const totals = usage({ firstActivity: 0, totalTokens: index + 1, totalCost: index + 1 });
+    accumulator.add({
+      agentId: name,
+      channel: name,
+      creatorKey: name,
+      usage: {
+        ...totals,
+        toolUsage: { totalCalls: index + 1, uniqueTools: 1, tools: [{ name, count: index + 1 }] },
+        modelUsage: [{ provider: name, model: name, count: 1, totals }],
+        dailyBreakdown: [day(date, totals)],
+        dailyModelUsage: [modelDay(date, name, index + 1, index + 1, 1, name)],
+        dailyLatency: [{ date, ...latency(1, 10, 10, 10) }],
+      },
+    });
+  }
+  const sortCopies = vi.spyOn(Array.prototype, "toSorted");
+  let result: ReturnType<typeof accumulator.finish>;
+  try {
+    result = accumulator.finish();
+    expect(sortCopies).not.toHaveBeenCalled();
+  } finally {
+    sortCopies.mockRestore();
+  }
+  expect(result.byModel.map(({ model }) => model)).toEqual(["second", "first"]);
+  expect(result.byCreator?.map(({ key }) => key)).toEqual(["second", "first"]);
+  expect(result.daily.map(({ date }) => date)).toEqual(["2026-03-11", "2026-03-12"]);
+  const expected = structuredClone(result);
+  const arrays = [
+    result.tools.tools,
+    result.byModel,
+    result.byProvider,
+    result.byAgent,
+    result.byChannel,
+    result.byCreator,
+    result.costDaily,
+    result.dailyLatency,
+    result.modelDaily,
+    result.daily,
+    ...(result.byCreator ?? []).flatMap((creator) => [creator.daily, creator.sessionActivity]),
+  ];
+  for (const array of arrays) {
+    array?.splice(0);
+  }
+  expect(accumulator.finish()).toEqual(expected);
+});
 
 it("retains incomplete daily and model subtotals after merging complete rows", () => {
   const date = "2026-05-15";
