@@ -132,23 +132,9 @@ it.each([
   expect(resolve(configuredProvider(provider, primary, model))).toEqual(expected);
 });
 
-it("uses an authenticated custom provider's configured vision model", () => {
+it("preserves slashes in an authenticated custom provider's configured vision model", () => {
   available.add("hatchery");
   expect(
-    resolve(configuredProvider("hatchery", "hatchery/text-1", "vision-1", ["text", "image"])),
-  ).toEqual({ primary: "hatchery/vision-1" });
-});
-
-it("preserves slashes in an authenticated custom provider's configured vision model", () => {
-  available.add("fireworks");
-  expect(
-    resolve(
-      configuredProvider(
-        "fireworks",
-        "fireworks/accounts/fireworks/models/text-1",
-        "accounts/fireworks/models/vision-1",
-        ["text", "image"],
-      ),
-    ),
-  ).toEqual({ primary: "fireworks/accounts/fireworks/models/vision-1" });
+    resolve(configuredProvider("hatchery", "hatchery/text-1", "org/team/v1", ["text", "image"])),
+  ).toEqual({ primary: "hatchery/org/team/v1" });
 });

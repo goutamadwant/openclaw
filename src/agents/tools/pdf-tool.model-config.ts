@@ -81,13 +81,12 @@ function resolveImageCandidateRefs(
       if (documentImageModel === false) {
         return null;
       }
-      const providerVision = resolveProviderVisionModelFromConfig({
-        cfg: params.cfg,
-        provider: providerId,
-      });
       const modelId =
         documentImageModel ??
-        (providerVision ? localModelIdForProvider(providerId, providerVision) : undefined) ??
+        resolveProviderVisionModelFromConfig({
+          cfg: params.cfg,
+          provider: providerId,
+        }) ??
         resolveDefaultMediaModel({
           cfg: params.cfg,
           workspaceDir: params.workspaceDir,
