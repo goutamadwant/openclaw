@@ -138,3 +138,17 @@ it("uses an authenticated custom provider's configured vision model", () => {
     resolve(configuredProvider("hatchery", "hatchery/text-1", "vision-1", ["text", "image"])),
   ).toEqual({ primary: "hatchery/vision-1" });
 });
+
+it("preserves slashes in an authenticated custom provider's configured vision model", () => {
+  available.add("fireworks");
+  expect(
+    resolve(
+      configuredProvider(
+        "fireworks",
+        "fireworks/accounts/fireworks/models/text-1",
+        "accounts/fireworks/models/vision-1",
+        ["text", "image"],
+      ),
+    ),
+  ).toEqual({ primary: "fireworks/accounts/fireworks/models/vision-1" });
+});

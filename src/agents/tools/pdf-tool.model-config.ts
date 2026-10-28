@@ -81,12 +81,13 @@ function resolveImageCandidateRefs(
       if (documentImageModel === false) {
         return null;
       }
+      const providerVision = resolveProviderVisionModelFromConfig({
+        cfg: params.cfg,
+        provider: providerId,
+      });
       const modelId =
         documentImageModel ??
-        resolveProviderVisionModelFromConfig({
-          cfg: params.cfg,
-          provider: providerId,
-        })?.split("/")[1] ??
+        (providerVision ? localModelIdForProvider(providerId, providerVision) : undefined) ??
         resolveDefaultMediaModel({
           cfg: params.cfg,
           workspaceDir: params.workspaceDir,
@@ -131,14 +132,14 @@ export function resolvePdfModelConfigForTool(
     cfg: params.cfg,
     provider: primary.provider,
   });
-  const providerDefault =
-    providerVision?.split("/")[1] ??
-    resolveDefaultMediaModel({
-      cfg: params.cfg,
-      workspaceDir: params.workspaceDir,
-      providerId: primary.provider,
-      capability: "image",
-    });
+  const providerDefault = providerVision
+    ? localModelIdForProvider(primary.provider, providerVision)
+    : resolveDefaultMediaModel({
+        cfg: params.cfg,
+        workspaceDir: params.workspaceDir,
+        providerId: primary.provider,
+        capability: "image",
+      });
   const primarySupportsNativePdf = providerSupportsNativePdfDocument({
     cfg: params.cfg,
     workspaceDir: params.workspaceDir,
