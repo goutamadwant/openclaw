@@ -78,8 +78,6 @@ type ChatViewInput = {
   bindTranscriptViewport: (element: HTMLDivElement) => () => void;
   getTranscriptElement: () => HTMLDivElement | null;
   getScrollToLatestElement: () => HTMLButtonElement | null;
-  /** Lifetime-bound composer recovery surface registration (disabled banner). */
-  bindComposerRecoverySurface?: (element: HTMLElement) => () => void;
 };
 
 // Must match the fixed height of .chat-pending-inputs--history.
@@ -277,7 +275,6 @@ function ChatComposerView(input: ChatViewInput) {
       questions={input.questions}
       getTranscriptElement={input.getTranscriptElement}
       getScrollToLatestElement={input.getScrollToLatestElement}
-      onRecoverySurfaceRef={input.bindComposerRecoverySurface}
       progressCard={
         input.props.detailsEnabled || activities()?.progress ? null : input.props.progressCard
       }
@@ -444,7 +441,6 @@ function ChatContent(input: { props: ChatProps; questions: ComposerQuestions }) 
     connectedElementRef<HTMLButtonElement>();
   const replacementComposer = connectedElementRef<HTMLElement>();
   const composerTargetId = createUniqueId();
-  const recoverySurface = connectedElementRef<HTMLElement>();
   const { bind: bindComposerFooter, read: getComposerFooter } =
     connectedElementRef<HTMLDivElement>();
   const application = useOptionalApplication();
@@ -476,17 +472,10 @@ function ChatContent(input: { props: ChatProps; questions: ComposerQuestions }) 
       (replacement) => {
         const replacementElement = replacement && replacementComposer.read();
         const target =
-          replacementElement || getChatComposerState(input.props.paneId).composerTextarea;
-        if (target) {
-          target.focus({ preventScroll: true });
-          return;
-        }
-        // Archived sessions replace the composer with a recovery surface.
-        const fallback = recoverySurface.read() ?? getComposerFooter();
-        if (fallback) {
-          fallback.setAttribute("tabindex", "-1");
-          fallback.focus({ preventScroll: true });
-        }
+          replacementElement ||
+          getChatComposerState(input.props.paneId).composerTextarea ||
+          getComposerFooter();
+        target?.focus({ preventScroll: true });
       },
       // This view mounts only while its pane's question source exists.
       input.questions.source()!.asyncQuestions,
@@ -501,7 +490,6 @@ function ChatContent(input: { props: ChatProps; questions: ComposerQuestions }) 
     bindTranscriptViewport,
     getTranscriptElement,
     getScrollToLatestElement,
-    bindComposerRecoverySurface: recoverySurface.bind,
   });
   const historyMessage = () => {
     const state = frame().historyLoadState;

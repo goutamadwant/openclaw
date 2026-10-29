@@ -134,7 +134,6 @@ export function renderChatComposerView(
             "callout--action",
           ]}
           role="status"
-          ref={elementRef(props.onRecoverySurfaceRef)}
         >
           {banner().icon ? (
             <span
