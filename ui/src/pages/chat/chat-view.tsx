@@ -78,6 +78,8 @@ type ChatViewInput = {
   bindTranscriptViewport: (element: HTMLDivElement) => () => void;
   getTranscriptElement: () => HTMLDivElement | null;
   getScrollToLatestElement: () => HTMLButtonElement | null;
+  /** Lifetime-bound composer recovery surface registration (disabled banner). */
+  bindComposerRecoverySurface?: (element: HTMLElement) => () => void;
 };
 
 function ChatTranscript(input: ChatViewInput) {
@@ -265,6 +267,7 @@ function ChatComposerView(input: ChatViewInput) {
       questions={input.questions}
       getTranscriptElement={input.getTranscriptElement}
       getScrollToLatestElement={input.getScrollToLatestElement}
+      onRecoverySurfaceRef={input.bindComposerRecoverySurface}
       progressCard={
         input.props.detailsEnabled || activities()?.progress ? null : input.props.progressCard
       }
@@ -425,6 +428,9 @@ function ChatContent(input: { props: ChatProps; questions: ComposerQuestions }) 
     connectedElementRef<HTMLButtonElement>();
   const replacementComposer = connectedElementRef<HTMLElement>();
   const composerTargetId = createUniqueId();
+  const recoverySurface = connectedElementRef<HTMLElement>();
+  const { bind: bindComposerFooter, read: getComposerFooter } =
+    connectedElementRef<HTMLDivElement>();
   const application = useOptionalApplication();
   const gateway = application && projectGateway(application.gateway);
   const skillFileHovercard = createSkillFileHovercard({
@@ -455,7 +461,16 @@ function ChatContent(input: { props: ChatProps; questions: ComposerQuestions }) 
         const replacementElement = replacement && replacementComposer.read();
         const target =
           replacementElement || getChatComposerState(input.props.paneId).composerTextarea;
-        target?.focus({ preventScroll: true });
+        if (target) {
+          target.focus({ preventScroll: true });
+          return;
+        }
+        // Archived sessions replace the composer with a recovery surface.
+        const fallback = recoverySurface.read() ?? getComposerFooter();
+        if (fallback) {
+          fallback.setAttribute("tabindex", "-1");
+          fallback.focus({ preventScroll: true });
+        }
       },
       // This view mounts only while its pane's question source exists.
       input.questions.source()!.asyncQuestions,
@@ -470,6 +485,7 @@ function ChatContent(input: { props: ChatProps; questions: ComposerQuestions }) 
     bindTranscriptViewport,
     getTranscriptElement,
     getScrollToLatestElement,
+    bindComposerRecoverySurface: recoverySurface.bind,
   });
   const historyMessage = () => {
     const state = frame().historyLoadState;
@@ -582,23 +598,18 @@ function ChatContent(input: { props: ChatProps; questions: ComposerQuestions }) 
                       forwardChatWheelToTranscript(event, input.props.transcript.scrollElement)
                     }
                   >
-                    <a
-                      class="shell-skip-link chat-composer-skip-link"
-                      href={`#${composerTargetId}`}
-                      onClick={(event) => {
-                        event.preventDefault();
-                        frame().threadProps.onFocusComposer?.();
-                        if (
-                          event.currentTarget.ownerDocument.activeElement === event.currentTarget
-                        ) {
-                          event.currentTarget.ownerDocument
-                            .getElementById(composerTargetId)
-                            ?.focus({ preventScroll: true });
-                        }
-                      }}
-                    >
-                      {t("chat.actions.skipToComposer")}
-                    </a>
+                    <Show when={!input.props.suggestionComposer}>
+                      <a
+                        class="shell-skip-link chat-composer-skip-link"
+                        href={`#${composerTargetId}`}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          frame().threadProps.onFocusComposer?.();
+                        }}
+                      >
+                        {t("chat.actions.skipToComposer")}
+                      </a>
+                    </Show>
                     <Show when={frame().historyFailed && !frame().transcriptEmpty}>
                       {historyFailure(true)}
                     </Show>
@@ -665,7 +676,7 @@ function ChatContent(input: { props: ChatProps; questions: ComposerQuestions }) 
                       id={composerTargetId}
                       class="chat-footer"
                       tabindex={-1}
-                      ref={[elementRef(input.props.onFooterElementRef)]}
+                      ref={[bindComposerFooter, elementRef(input.props.onFooterElementRef)]}
                     >
                       <ChatSurface
                         binding={{

@@ -59,7 +59,7 @@ it("keeps Swarm progress between the transcript and composer", async () => {
   };
   const container = renderChatView({ ...props, swarm: { sessionKey, sessions: [] } });
   const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
-  textarea.focus();
+  container.querySelector<HTMLAnchorElement>(".chat-composer-skip-link")!.click();
   expect(container.querySelector("[data-test-id=chat-swarm]")).toBeNull();
   renderChatInto(container, { ...props, swarm: { sessionKey, sessions } });
   await vi.dynamicImportSettled();
