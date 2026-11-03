@@ -37,7 +37,6 @@ import { resolveIMessageDirectChatService } from "../chat-context.js";
 import { resolveIMessageConversationRoute } from "../conversation-route.js";
 import { resolveIMessageGroupSystemPrompt } from "../group-policy.js";
 import { isKnownFromMeIMessageTarget, rememberIMessageReplyCache } from "../monitor-reply-cache.js";
-import { getIMessageRuntime } from "../runtime.js";
 import {
   formatIMessageChatTarget,
   isAllowedIMessageReplyContextSender,
@@ -48,6 +47,7 @@ import {
 import type { IMessageDmHistoryContext } from "./dm-history.js";
 import type { SentMessageCache } from "./echo-cache.js";
 import { resolveIMessageInboundMentionPolicy } from "./mention-policy.js";
+import { resolveIMessagePairingStoreAdmission } from "./pairing-store-admission.js";
 import {
   type IMessageReactionContext,
   resolveIMessageReactionContext,
@@ -447,16 +447,16 @@ export async function resolveIMessageInboundDecision(params: {
     sender,
     chatId,
   });
-  let storeAllowFrom: Promise<string[]> | undefined;
-  const ingressResolver = getIMessageRuntime().channel.inbound.ingress.createResolver({
-    channelId: "imessage",
-    accountId: params.accountId,
-    identity: imessageIngressIdentity,
-    cfg: params.cfg,
-    readStoreAllowFrom: () => (storeAllowFrom ??= params.readStoreAllowFrom()),
-  });
-  const resolveChannelIngress = (contextBinding?: ChannelIngressContextBinding) =>
-    ingressResolver.message({
+  const { accessDecision, resolveChannelIngress } = await resolveIMessagePairingStoreAdmission({
+    isGroup,
+    readStoreAllowFrom: params.readStoreAllowFrom,
+    resolver: {
+      channelId: "imessage",
+      accountId: params.accountId,
+      identity: imessageIngressIdentity,
+      cfg: params.cfg,
+    },
+    message: {
       subject: {
         stableId: sender,
         aliases: {
@@ -469,7 +469,6 @@ export async function resolveIMessageInboundDecision(params: {
         kind: isGroup ? "group" : "direct",
         id: chatId != null ? String(chatId) : sender,
       },
-      contextBinding,
       dmPolicy: normalizeChannelDmPolicy(params.dmPolicy) ?? "pairing",
       groupPolicy:
         params.groupPolicy === "open" || params.groupPolicy === "disabled"
@@ -483,8 +482,8 @@ export async function resolveIMessageInboundDecision(params: {
         hasControlCommand: hasControlCommandInMessage,
         directGroupAllowFrom: "effective",
       },
-    });
-  const accessDecision = await resolveChannelIngress();
+    },
+  });
   const { commandAccess, senderAccess } = accessDecision;
   const effectiveGroupAllowFrom = senderAccess.effectiveGroupAllowFrom;
 
